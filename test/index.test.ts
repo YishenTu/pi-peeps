@@ -44,16 +44,36 @@ function harness() {
 }
 const task = { task: "isolated task" };
 
-test("index tool surface rejects non-TUI/aborted spawn before admission", async () => {
+test("index tool surface rejects single-shot/aborted spawn before admission", async () => {
   const h = harness();
   await h.emit("session_start");
   assert.deepEqual([...h.tools.keys()], ["peeps_spawn", "peeps_send", "peeps_interrupt", "peeps_inspect", "peeps_close"]);
   const abort = new AbortController(); abort.abort();
   await assert.rejects(h.call("peeps_spawn", task, abort.signal), /abort/i);
-  h.ctx.mode = "rpc";
-  await assert.rejects(h.call("peeps_spawn", task), /TUI parent/);
+  for (const mode of ["print", "json"] as const) {
+    h.ctx.mode = mode;
+    await assert.rejects(h.call("peeps_spawn", task), /TUI or RPC parent/);
+    await assert.rejects(h.call("peeps_close", { id: "all" }), /TUI or RPC parent/);
+  }
   const inspected = await h.call("peeps_inspect", {});
   assert.equal((inspected.details as any).total, 0);
+  await h.emit("session_shutdown");
+});
+
+test("an RPC parent is accepted and gets no TUI presentation", async () => {
+  const h = harness();
+  h.ctx.mode = "rpc";
+  await h.emit("session_start");
+  const spawned = await h.call("peeps_spawn", task);
+  const id = (spawned.details as any).id;
+  assert.equal(typeof id, "string");
+  await settle(h, id);
+  await h.call("peeps_interrupt", { id });
+  await h.call("peeps_close", { id });
+  await h.commands.get("peeps")!.handler("close all", h.ctx);
+  await h.commands.get("peeps")!.handler("", h.ctx);
+  assert.deepEqual(h.notifications, ["Peeps viewer requires the terminal UI."]);
+  assert.equal(h.widgets.length, 0, "the overview widget is TUI-only");
   await h.emit("session_shutdown");
 });
 
@@ -188,8 +208,9 @@ async function settle(h: ReturnType<typeof harness>, id: string) {
   throw new Error("child did not settle");
 }
 
-test("actual index Stop wiring holds outcomes until an interactive prompt reaches before_agent_start", async () => {
+for (const human of ["interactive", "rpc"] as const) test(`actual index Stop wiring holds outcomes until an ${human} prompt reaches before_agent_start`, async () => {
   const h = harness();
+  if (human === "rpc") h.ctx.mode = "rpc";
   await h.emit("session_start");
   const turn = new AbortController();
   (h.ctx as any).signal = turn.signal;
@@ -207,8 +228,8 @@ test("actual index Stop wiring holds outcomes until an interactive prompt reache
   await h.emit("before_agent_start"); // Another extension's turn.
   await h.emit("input", { source: "extension" });
   await h.emit("before_agent_start");
-  await h.emit("input", { source: "interactive" }); // Input alone does not release.
-  assert.equal(h.notices.length, 0, "only an interactive prompt reaching before_agent_start releases the hold");
+  await h.emit("input", { source: human }); // Input alone does not release.
+  assert.equal(h.notices.length, 0, "only a human prompt reaching before_agent_start releases the hold");
 
   await h.emit("before_agent_start");
   assert.equal(h.notices.length, 1);

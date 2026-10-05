@@ -1,4 +1,4 @@
-// Local-only provider for the optional PTY smoke test. Never contacts a service.
+// Local-only parent provider for the PTY smoke and the RPC-parent integration test. Never contacts a service.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
 import scripted from "./scripted-provider.ts";

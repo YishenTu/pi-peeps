@@ -55,6 +55,22 @@ test("Stop holds later outcomes; interactive input alone does not wake; accepted
   h.offer(makeRun("next"));
   assert.deepEqual(h.sent[1]?.[1], { deliverAs: "steer", triggerTurn: true });
 });
+test("an RPC client prompt is a human prompt and releases the hold; an extension prompt never does", () => {
+  const h = setup();
+  const controller = new AbortController();
+  h.delivery.watch(controller.signal);
+  controller.abort();
+  const run = h.offer();
+  assert.equal(run.delivery, "held");
+  h.delivery.input("extension");
+  h.delivery.beforeAgentStart();
+  assert.equal(h.sent.length, 0);
+  h.delivery.input("rpc");
+  assert.equal(h.sent.length, 0, "input alone does not release");
+  h.delivery.beforeAgentStart();
+  assert.equal(h.sent.length, 1);
+  assert.deepEqual(h.sent[0]?.[1], { deliverAs: "nextTurn", triggerTurn: false });
+});
 test("queued notices absent on settle are unconfirmed and never blindly resent", () => {
   const h = setup();
   const run = h.offer();

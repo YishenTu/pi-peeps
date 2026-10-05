@@ -1,4 +1,4 @@
-import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, InputSource, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { DeliveryStatus, Report } from "./contracts.ts";
 
 export const RESULT_TYPE = "peeps-result";
@@ -19,7 +19,7 @@ export class ResultDelivery {
   private outcomes = new Map<string, Outcome>();
   private closed = false;
   private paused = false;
-  private interactiveCandidate = false;
+  private humanCandidate = false;
   private unbindAbort?: () => void;
   private host: DeliveryHost;
   constructor(host: DeliveryHost) { this.host = host; }
@@ -28,17 +28,18 @@ export class ResultDelivery {
     this.unbindAbort?.();
     this.unbindAbort = undefined;
     if (!signal || this.closed) return;
-    const pause = () => { this.paused = true; this.interactiveCandidate = false; };
+    const pause = () => { this.paused = true; this.humanCandidate = false; };
     if (signal.aborted) pause();
     else {
       signal.addEventListener("abort", pause, { once: true });
       this.unbindAbort = () => signal.removeEventListener("abort", pause);
     }
   }
-  input(source: string): void { this.interactiveCandidate = source === "interactive"; }
+  /** A human prompt arrives from the TUI editor or an RPC client; another extension's prompt is not one. */
+  input(source: InputSource): void { this.humanCandidate = source === "interactive" || source === "rpc"; }
   beforeAgentStart(): void {
-    const resume = this.interactiveCandidate;
-    this.interactiveCandidate = false;
+    const resume = this.humanCandidate;
+    this.humanCandidate = false;
     if (!resume || this.closed) return;
     this.paused = false;
     // The ordinary prompt will drain nextTurn custom messages after this hook.

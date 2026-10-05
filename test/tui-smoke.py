@@ -11,7 +11,7 @@ for d in [agent,workspace,state]: d.mkdir()
 env = {"PATH":os.environ["PATH"],"HOME":str(sandbox),"TERM":"xterm-256color","PI_OFFLINE":"1","PI_CODING_AGENT_DIR":str(agent),"PEEPS_TEST_DIR":str(state),"PEEPS_SCRIPT_JSON":json.dumps({"finalText":"UI-CHILD-FINAL","steerToken":"unused","gateTag":"ui"}),"NO_COLOR":"1"}
 master, slave = pty.openpty()
 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH",40,120,0,0))
-args = [node,str(repo/"node_modules/@earendil-works/pi-coding-agent/dist/cli.js"),"--no-extensions","-e",str(repo/"test/fixtures/tui-provider.ts"),"-e",str(repo/"src/index.ts"),"--no-skills","--no-prompt-templates","--no-context-files","--no-approve","--provider","peeps-scripted","--model","peeps-scripted-1","Delegate one task"]
+args = [node,str(repo/"node_modules/@earendil-works/pi-coding-agent/dist/cli.js"),"--no-extensions","-e",str(repo/"test/fixtures/parent-provider.ts"),"-e",str(repo/"src/index.ts"),"--no-skills","--no-prompt-templates","--no-context-files","--no-approve","--provider","peeps-scripted","--model","peeps-scripted-1","Delegate one task"]
 proc = subprocess.Popen(args,stdin=slave,stdout=slave,stderr=slave,cwd=workspace,env=env,start_new_session=True)
 os.close(slave)
 output = b""

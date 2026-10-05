@@ -21,7 +21,7 @@ Or try it for one session without installing:
 pi -e git:github.com/YishenTu/pi-peeps
 ```
 
-Works in Pi's terminal UI on macOS and Linux (Linux not yet tested). Windows and compiled Pi binaries aren't supported.
+Works in Pi's terminal UI and in RPC mode (`pi --mode rpc`, as used by apps that embed Pi) on macOS and Linux (Linux not yet tested). Print and JSON mode (`pi -p`, `pi --mode json`) aren't supported because Pi exits after the prompt, which would close every subagent. Windows and compiled Pi binaries aren't supported.
 
 ## Usage
 
@@ -34,6 +34,8 @@ Each subagent is a Pi session of its own: it starts with a fresh conversation in
 Subagents don't hold on to resources: one that sits idle for 10 minutes closes, and all of them close when your session ends. Messaging a closed subagent resumes it where it left off, even after you reload or restart Pi.
 
 ### Watching subagents
+
+The overview, viewer, and shortcut are part of the terminal UI. In RPC mode, each answer reaches the client as an ordinary session message (`role: "custom"`, `customType: "peeps-result"`), and `/peeps interrupt` and `/peeps close` still work as prompts.
 
 | Key | Action |
 | --- | --- |
@@ -48,7 +50,7 @@ Subagents don't hold on to resources: one that sits idle for 10 minutes closes, 
 ## Good to know
 
 - **Shared files.** Subagents work in your directory and can edit the same files as the main agent. They aren't sandboxed, and closing one doesn't undo its edits.
-- **Stop.** Pressing Stop on the main agent doesn't stop subagents. Their answers wait until you send your next message.
+- **Stop.** Pressing Stop on the main agent (or an RPC `abort`) doesn't stop subagents. Their answers wait until you send your next message.
 - **No approvals.** If a subagent asks for confirmation, the request is declined and that subagent stops.
 - **History.** For saved sessions, subagent sessions are kept in a folder beside the main session file, named after it (`<session>.jsonl` → `<session>/`). They don't appear in Pi's session picker and are not deleted automatically, even if you delete the main session. Only the session that started a subagent can resume it.
 - **Ephemeral sessions** (`--no-session`) keep no subagent history, so their subagents can't resume and never close for idleness.
