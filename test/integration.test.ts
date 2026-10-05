@@ -31,7 +31,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { getPackageDir } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { readArchive } from "../src/archive.ts";
+import { ArchiveTooLargeError, readArchive } from "../src/archive.ts";
 import type { RunRecord } from "../src/archive.ts";
 import { buildLaunch, PEEPS_TOOL_NAMES, validateChildState } from "../src/launch.ts";
 import type { LaunchContext } from "../src/launch.ts";
@@ -448,7 +448,8 @@ test("close stops a working RPC child and leaves no orphan", { timeout: TEST_TIM
   await waitFor(() => !processAlive(pid), "closed child process was not reaped", 15_000);
 });
 
-test("interrupt keeps a real child; after close and a parent reload a message resumes its own session", { timeout: TEST_TIMEOUT_MS }, async (t) => {
+for (const oversized of [false, true]) {
+test(`interrupt keeps a real child; after close and reload it resumes its own session${oversized ? " without projecting an oversized archive" : ""}`, { timeout: TEST_TIMEOUT_MS }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "peeps-integration-resume-"));
   const nonce = root.slice(-8);
   const spec: ScriptSpec = { finalText: `UNUSED-${nonce}`, steerToken: `STEER-${nonce}`, gateTag: `gate-${nonce}` };
@@ -481,7 +482,11 @@ test("interrupt keeps a real child; after close and a parent reload a message re
   await harness.manager.closeChild(run.id);
   await waitFor(() => !processAlive(firstPid), "closed child process outlived the run", 15_000);
   await harness.manager.close();
-  reloaded = new RunManager(harness.options, [harness.records[harness.records.length - 1] as RunRecord]);
+  reloaded = new RunManager({ ...harness.options,
+    // The unit test exercises the actual size bound; here verify that native Pi
+    // retains its conversation when the viewer's archive projection is unavailable.
+    readArchive: oversized ? async () => { throw new ArchiveTooLargeError(); } : harness.options.readArchive,
+  }, [harness.records[harness.records.length - 1] as RunRecord]);
   assert.equal(reloaded.get(run.id)?.status, "closed");
 
   const second = `FOLLOWUP: ${nonce} second`;
@@ -490,6 +495,10 @@ test("interrupt keeps a real child; after close and a parent reload a message re
   const view = reloaded.get(run.id)!;
   assert.equal(view.finalText, `REPLY ${second}`);
   assert.equal(view.sessionFile, sessionFile, "the resumed child writes to its own session file");
+  if (oversized) {
+    assert.ok(harness.warnings.some(w => /only new events/.test(w)));
+    assert.ok(!view.transcript.items.some(i => i.kind === "message" && textOf(i.message) === task));
+  }
   const secondPid = Number(await readFile(join(harness.testDir, "child.pid"), "utf8"));
   assert.notEqual(secondPid, firstPid);
 
@@ -505,6 +514,7 @@ test("interrupt keeps a real child; after close and a parent reload a message re
   await reloaded.close();
   await waitFor(() => !processAlive(secondPid), "resumed child process outlived its parent runtime", 15_000);
 });
+}
 
 /**
  * Boot one isolated child and read its registered commands. The guarded run is

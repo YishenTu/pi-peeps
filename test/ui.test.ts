@@ -393,3 +393,63 @@ test("viewer closes on ctrl+c without aborting", () => {
   assert.equal(doneCalls, 1);
   viewer.dispose();
 });
+
+for (const delayed of [false, true]) {
+  test(`viewer shows resumed live events when old archive failure arrives ${delayed ? "after" : "before"} resume`, async t => {
+    const source = new FakeSource();
+    const run = runView("run", new Transcript());
+    run.status = "closed";
+    source.runs = [run];
+    let fail!: (reason: Error) => void;
+    source.loadTranscript = () => new Promise<void>((_resolve, reject) => { fail = reject; });
+    const viewer = new ViewerComponent({
+      source, tui: fakeTui().tui, theme, keybindings, cwd: "/tmp", initialId: run.id,
+      factory: { create: () => new StubComponent("NEW LIVE ANSWER") }, done: () => {},
+    });
+    t.after(() => viewer.dispose());
+    if (!delayed) {
+      fail(new Error("archive too large to display"));
+      await Promise.resolve();
+      assert.match(viewer.render(80).join("\n"), /archive too large/);
+    }
+    const transcript = new Transcript();
+    transcript.restore([{ role: "user", content: "new work", timestamp: 1 }]);
+    run.transcript = transcript;
+    run.status = "working";
+    source.emit();
+    if (delayed) fail(new Error("archive too large to display"));
+    await Promise.resolve();
+    const rendered = viewer.render(80).join("\n");
+    assert.match(rendered, /NEW LIVE ANSWER/);
+    assert.doesNotMatch(rendered, /archive too large/);
+  });
+}
+
+for (const renderEmpty of [false, true]) {
+  test(`viewer discards old rendered items when resume replaces the transcript${renderEmpty ? " through an empty frame" : ""}`, t => {
+    const old = new Transcript();
+    const user = (content: string) => ({ role: "user" as const, content, timestamp: 1 });
+    old.apply({ type: "message_start", message: user("OLD CONTENT") });
+    old.apply({ type: "message_end", message: user("OLD CONTENT") });
+    const source = new FakeSource();
+    const run = runView("run", old);
+    source.runs = [run];
+    const viewer = new ViewerComponent({
+      source, tui: fakeTui().tui, theme, keybindings, cwd: "/tmp", initialId: run.id,
+      factory: { create: item => new StubComponent(item.kind === "message" && item.message.role === "user" ? String(item.message.content) : "tool") },
+      done: () => {},
+    });
+    t.after(() => viewer.dispose());
+    assert.match(viewer.render(80).join("\n"), /OLD CONTENT/);
+    const resumed = new Transcript();
+    run.transcript = resumed;
+    if (renderEmpty) viewer.render(80);
+    resumed.apply({ type: "message_start", message: user("NEW CONTENT") });
+    resumed.apply({ type: "message_end", message: user("NEW CONTENT") });
+    assert.equal(resumed.items[0]!.id, old.items[0]!.id);
+    assert.equal(resumed.items[0]!.version, old.items[0]!.version);
+    const rendered = viewer.render(80).join("\n");
+    assert.match(rendered, /NEW CONTENT/);
+    assert.doesNotMatch(rendered, /OLD CONTENT/);
+  });
+}

@@ -36,10 +36,11 @@ export class ViewerComponent implements Component {
   private readonly unsubscribe: () => void;
   private readonly windows = new Map<string, ScrollWindow>();
   private readonly requested = new Set<string>();
-  private readonly loadErrors = new Map<string, string>();
+  private readonly loadErrors = new Map<string, { transcript: RunView["transcript"] | undefined; message: string }>();
   private mode: "list" | "thread";
   private selectedId: string | undefined;
   private renderedRunId: string | undefined;
+  private renderedTranscript: RunView["transcript"] | undefined;
   private pinnedId: string | undefined;
   private releasePin?: () => void;
   private theme: Theme;
@@ -217,10 +218,11 @@ export class ViewerComponent implements Component {
     const bodyHeight = frameFreeRows(height, header.length, 2);
     const window = this.windowFor(run.id);
     window.setViewport(bodyHeight);
-    // Item IDs are local to a child transcript, not globally unique across runs.
-    if (this.renderedRunId !== run.id) {
+    // Item IDs are local to a transcript, including replacements on resume.
+    if (this.renderedRunId !== run.id || this.renderedTranscript !== run.transcript) {
       this.renderer.invalidate();
       this.renderedRunId = run.id;
+      this.renderedTranscript = run.transcript;
     }
     const rendered = this.renderer.render(run.transcript.items, frameInnerWidth(width), {
       expanded: this.expanded,
@@ -229,7 +231,8 @@ export class ViewerComponent implements Component {
     window.setContentHeight(rendered.lines.length);
     window.refresh();
     const loadError = this.loadErrors.get(run.id);
-    const body = loadError ? [theme.fg("error", loadError)] : window.window(rendered.lines);
+    const body = loadError?.transcript === run.transcript
+      ? [theme.fg("error", loadError.message)] : window.window(rendered.lines);
 
     const total = rendered.lines.length;
     const position = total === 0
@@ -311,6 +314,7 @@ export class ViewerComponent implements Component {
     this.releasePin = undefined;
     if (this.pinnedId) this.requested.delete(this.pinnedId);
     this.pinnedId = undefined;
+    this.renderedTranscript = undefined;
     this.renderer.invalidate();
   }
 
@@ -322,18 +326,19 @@ export class ViewerComponent implements Component {
     }
     if (this.requested.has(id)) return;
     this.requested.add(id);
+    const transcript = this.options.source.get(id)?.transcript;
     let pending: Promise<void>;
     try {
       pending = this.options.source.loadTranscript(id);
     } catch (error) {
-      this.loadErrors.set(id, String(error));
+      this.loadErrors.set(id, { transcript, message: String(error) });
       this.requested.delete(id);
       return;
     }
     pending.then(
       () => { this.loadErrors.delete(id); this.requestRender(); },
       error => {
-        this.loadErrors.set(id, String(error));
+        this.loadErrors.set(id, { transcript, message: String(error) });
         this.requested.delete(id);
         this.requestRender();
       },
