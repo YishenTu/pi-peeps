@@ -6,6 +6,7 @@ Human usage, support, and contributor documentation belongs in `README.md`. Keep
 
 - This is extension-only. Use public Pi APIs; do not patch Pi core, access private runtime fields, monkey-patch the host, or require proposed host APIs.
 - A child is a general-purpose, fresh-context Pi session. The parent talks to it only with ordinary messages. Its process lives at most as long as its parent runtime; under a saved parent its session persists, so a later message resumes it. Do not inject the parent's transcript, restart or resume children without a parent message, add a task protocol or persistent teammate identities, or introduce a daemon.
+- Children need a long-lived parent: TUI or RPC mode. Reject single-shot print/JSON parents, whose exit would close every child. Overview, viewer, and shortcut are TUI-only; in RPC, results reach the client only as native session events, and Peeps never opens a dialog.
 - The human viewer is read-only and stays inside the parent's TUI. Do not switch the main session or replace its editor to inspect a child.
 - Pi packages and TypeBox are host-provided peer dependencies. Keep development copies in devDependencies, not bundled/runtime dependencies that can duplicate host classes or registries.
 
@@ -13,7 +14,7 @@ Human usage, support, and contributor documentation belongs in `README.md`. Keep
 
 - The run manager owns child lifetime, independently of tool calls and views. Viewer close releases only presentation/read leases. Runtime replacement must synchronously fence old-owner sends before awaiting teardown.
 - Mandatory child shutdown must run and be awaited even if optional host UI teardown throws. Keep this guarantee in the shared lifecycle cleanup path, not duplicated across event handlers.
-- Normal parent Stop leaves children working and holds later outcomes until an ordinary interactive prompt reaches `before_agent_start`. Input alone, viewer interaction, or another extension's turn is not authorization to release the hold.
+- Normal parent Stop (TUI Escape or RPC `abort`) leaves children working and holds later outcomes until a human prompt (input source `interactive` or `rpc`) reaches `before_agent_start`. Input alone, viewer interaction, or another extension's turn is not authorization to release the hold.
 - Parent shutdown, reload, session replacement, and tree navigation close old-owner children, aborting any work. Cancellation of the navigation does not resurrect them; only a later message does.
 - Every parent message is RPC `prompt` with `streamingBehavior: "steer"`: Pi starts a run when the child is idle and steers when it is working. Do not check child state first and choose (that races), and do not use raw `steer`, which can strand input if the child becomes idle before admission. Messages sent during startup queue behind the task.
 - `handled` is a native admission disposition: a child command/input extension consumed the message. Return it rather than treating it as a failure; no run starts and nothing is reported. A consumed task is different: the parent is waiting, so report that there is no answer.
@@ -44,7 +45,7 @@ Human usage, support, and contributor documentation belongs in `README.md`. Keep
 
 ## Verification
 
-Use the development commands in the README. Lifecycle/delivery changes need the isolated integration tests; UI or wiring changes also need the PTY smoke.
+Use the development commands in the README. Lifecycle/delivery changes need the isolated integration tests, including the RPC-mode parent; UI or wiring changes also need the PTY smoke.
 
 - Tests must use temporary agent directories and scripted providers, never personal config, real credentials, or paid model calls.
 - Do not install Peeps into the user's Pi configuration as part of testing.

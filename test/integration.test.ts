@@ -21,8 +21,11 @@
  *   - native child session archive read-back (direct and via RunManager)
  *   - closing a child, idle or working, with no orphaned process
  *   - interrupting a real child, and resuming its own session after close and a parent reload
+ *   - a real `pi --mode rpc` parent: tool spawn, automatic idle wake with the
+ *     notice visible to the RPC client, and child cleanup on parent exit
  */
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -38,9 +41,12 @@ import type { LaunchContext } from "../src/launch.ts";
 import { RpcProcess } from "../src/rpc-process.ts";
 import { RunManager, type ManagerOptions } from "../src/run-manager.ts";
 import type { ModelChoice, RunView } from "../src/contracts.ts";
+import { RESULT_TYPE } from "../src/delivery.ts";
 import { GATE_TOOL_NAME, SCRIPTED_MODEL, SCRIPTED_PROVIDER } from "./fixtures/scripted-provider.ts";
 
 const FIXTURE_EXTENSION = fileURLToPath(new URL("./fixtures/scripted-provider.ts", import.meta.url));
+/** Parent-side provider: calls peeps_spawn once, then answers locally. */
+const PARENT_FIXTURE_EXTENSION = fileURLToPath(new URL("./fixtures/parent-provider.ts", import.meta.url));
 /** The real Peeps extension: loaded explicitly so the child guard is exercised. */
 const PEEPS_EXTENSION = fileURLToPath(new URL("../src/index.ts", import.meta.url));
 const PACKAGE_DIR = getPackageDir();
@@ -579,4 +585,88 @@ test("child guard suppresses the nested Peeps extension while the control proves
   const control = await queryChildCommands(root, false);
   assert.equal(control.model, `${SCRIPTED_PROVIDER}/${SCRIPTED_MODEL}`);
   assert.ok(control.commands.includes("peeps"), `control child did not load the Peeps extension; commands: ${control.commands.join(",")}`);
+});
+
+type RpcRecord = Record<string, any>;
+const eventMessage = (record: RpcRecord) => record.message as { role?: string; customType?: string } | undefined;
+const isResultNotice = (record: RpcRecord) =>
+  eventMessage(record)?.role === "custom" && eventMessage(record)?.customType === RESULT_TYPE;
+
+test("an RPC-mode parent spawns a child and is woken by its result like a TUI parent", { timeout: TEST_TIMEOUT_MS }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "peeps-integration-rpc-parent-"));
+  const agentDir = join(root, "agent");
+  const workspace = join(root, "workspace");
+  const testDir = join(root, "script");
+  await Promise.all([mkdir(agentDir), mkdir(workspace), mkdir(testDir)]);
+  await writeAgentSettings(agentDir);
+  await writeFile(join(testDir, "release"), "go"); // The child's gate passes at once.
+  const childFinal = `RPC-PARENT-CHILD-FINAL-${root.slice(-8)}`;
+
+  // Like an embedding client (Claudian): a parent `pi --mode rpc` driven over stdio.
+  // Only PATH survives from the ambient environment: no credentials, no user config.
+  const parent = spawn(process.execPath, [
+    join(PACKAGE_DIR, "dist", "cli.js"), "--mode", "rpc", "--no-extensions",
+    "--extension", PARENT_FIXTURE_EXTENSION, "--extension", PEEPS_EXTENSION,
+    "--no-skills", "--no-prompt-templates", "--no-context-files",
+    "--provider", SCRIPTED_PROVIDER, "--model", SCRIPTED_MODEL,
+  ], {
+    cwd: workspace, stdio: ["pipe", "pipe", "pipe"],
+    env: {
+      PATH: process.env.PATH, HOME: root, PI_OFFLINE: "1", PI_CODING_AGENT_DIR: agentDir,
+      PEEPS_TEST_DIR: testDir, PEEPS_SCRIPT_JSON: JSON.stringify({ finalText: childFinal, steerToken: "unused", gateTag: "rpc-parent" }),
+    },
+  });
+  const exited = new Promise<void>((resolve) => { parent.once("exit", () => resolve()); });
+  let stderr = "";
+  parent.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+  const records: RpcRecord[] = [];
+  let buffered = "";
+  parent.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+    buffered += chunk;
+    let newline: number;
+    while ((newline = buffered.indexOf("\n")) >= 0) {
+      const line = buffered.slice(0, newline).trim();
+      buffered = buffered.slice(newline + 1);
+      if (line) records.push(JSON.parse(line) as RpcRecord);
+    }
+  });
+  t.after(async () => {
+    if (parent.exitCode === null) parent.kill("SIGKILL");
+    await rm(root, { recursive: true, force: true });
+  });
+
+  parent.stdin.write(JSON.stringify({ id: "prompt-1", type: "prompt", message: "Delegate one task" }) + "\n");
+  const diagnostics = () => `stderr: ${stderr}\nrecords: ${records.map((r) => r.type + (eventMessage(r)?.role ? ":" + eventMessage(r)!.role : "")).join(", ")}`;
+  await waitFor(() => records.some((r) => r.type === "tool_execution_end" && r.toolName === "peeps_spawn"), "peeps_spawn never finished");
+  const spawnEnd = records.find((r) => r.type === "tool_execution_end" && r.toolName === "peeps_spawn")!;
+  assert.equal(spawnEnd.isError, false, `RPC parent rejected peeps_spawn: ${JSON.stringify(spawnEnd.result)}`);
+
+  // The result wakes the idle parent: a new run starts from the notice alone.
+  await waitFor(() => records.filter((r) => r.type === "agent_settled").length >= 2, `the result never woke the parent\n${diagnostics()}`);
+  const noticeStart = records.findIndex((r) => r.type === "message_start" && isResultNotice(r));
+  assert.ok(noticeStart > 0, `no result notice reached the RPC client\n${diagnostics()}`);
+  const firstSettled = records.findIndex((r) => r.type === "agent_settled");
+  assert.ok(firstSettled < noticeStart, "the notice arrives after the spawning turn settled");
+  // Persistence notifications (entry_appended) interleave; the run itself is native.
+  const wake = records.slice(firstSettled + 1).filter((r) => r.type !== "entry_appended").map((r) => r.type);
+  assert.deepEqual(wake.slice(0, 4), ["agent_start", "turn_start", "message_start", "message_end"], `the wake is a native agent run\n${diagnostics()}`);
+  assert.deepEqual(wake.slice(-2), ["agent_end", "agent_settled"]);
+  assert.equal(records.filter((r) => r.type === "response" && r.command === "prompt").length, 1,
+    "no fabricated prompt: only the client's own prompt was admitted");
+
+  const notice = records.find((r) => r.type === "message_end" && isResultNotice(r))!.message;
+  assert.equal(notice.display, true);
+  assert.equal(notice.content, `[Peeps automated result \u2014 ${spawnEnd.result.details.id} \u2014 answer]\n${childFinal}`);
+  assert.equal(notice.details.runId, spawnEnd.result.details.id);
+  assert.equal(notice.details.seq, 1);
+  assert.equal(notice.details.status, "answer");
+  const reply = records.filter((r) => r.type === "message_end" && eventMessage(r)?.role === "assistant").at(-1)!.message;
+  assert.equal(textOf(reply), "PARENT-RECEIVED", "the parent model saw the notice");
+
+  // Closing the client's stdin shuts the parent down, which closes its children.
+  const childPid = Number(await readFile(join(testDir, "child.pid"), "utf8"));
+  assert.ok(processAlive(childPid), "an idle child stays alive with its parent");
+  parent.stdin.end();
+  await exited;
+  await waitFor(() => !processAlive(childPid), "child outlived its RPC parent", 10_000);
 });

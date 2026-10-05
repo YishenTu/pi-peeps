@@ -83,7 +83,8 @@ export default function peeps(pi: ExtensionAPI): void {
       },
       record: record => { if (alive()) pi.appendEntry("peeps/run", record); },
       report: (report, anchor) => { if (alive()) instance.delivery.offer(report, anchor); },
-      warn: message => { if (alive() && ctx.mode === "tui") ctx.ui.notify(message, "warning"); },
+      // TUI shows it; RPC forwards notify to the client fire-and-forget. Neither blocks.
+      warn: message => { if (alive() && ctx.hasUI) ctx.ui.notify(message, "warning"); },
     }, readRunRecords(ctx.sessionManager.getBranch()));
     const delivery = new ResultDelivery({
       owner,
@@ -97,8 +98,11 @@ export default function peeps(pi: ExtensionAPI): void {
     if (ctx.mode === "tui") instance.disposeWidget = mountOverview(ctx, manager);
     return instance;
   }
-  function requireTui(ctx: ExtensionContext): Runtime {
-    if (ctx.mode !== "tui") throw new Error("Peeps v0.1 requires a TUI parent. RPC/print parents are not supported.");
+  /** Children live only as long as the parent runtime, so single-shot print/JSON parents cannot own them. */
+  function requireLongLivedParent(ctx: ExtensionContext): Runtime {
+    if (ctx.mode !== "tui" && ctx.mode !== "rpc") {
+      throw new Error("Peeps requires a TUI or RPC parent. Print/JSON mode exits after its prompt, which would close every child.");
+    }
     return start(ctx);
   }
   async function view(ctx: ExtensionContext, id?: string): Promise<void> {
@@ -133,7 +137,7 @@ export default function peeps(pi: ExtensionAPI): void {
 
   pi.registerTool({
     name: "peeps_spawn", label: "Spawn peep", outputSchema: output,
-    description: "Start a fresh Pi agent in the same cwd with the task as its first message, and return immediately. No parent transcript is inherited. Whenever it finishes working, its exact final answer arrives automatically as an automated Peeps notice. It keeps its conversation: peeps_send continues it at any time, even after it was closed or this session was reloaded. Children may edit shared files; avoid conflicting assignments. Only TUI parents are supported.",
+    description: "Start a fresh Pi agent in the same cwd with the task as its first message, and return immediately. No parent transcript is inherited. Whenever it finishes working, its exact final answer arrives automatically as an automated Peeps notice. It keeps its conversation: peeps_send continues it at any time, even after it was closed or this session was reloaded. Children may edit shared files; avoid conflicting assignments. Requires a TUI or RPC parent.",
     promptSnippet: "Delegate a self-contained task to a fresh background Pi agent.",
     promptGuidelines: ["Give peeps self-contained context. Do not poll: answers arrive automatically. Use peeps_send to redirect or continue a child, peeps_interrupt to stop its current work, and peeps_close when you are done with it."],
     parameters: Type.Object({
@@ -143,7 +147,7 @@ export default function peeps(pi: ExtensionAPI): void {
     }),
     async execute(_id, params, signal, _update, ctx) {
       signal?.throwIfAborted();
-      const active = requireTui(ctx);
+      const active = requireLongLivedParent(ctx);
       const model = params.model ?? (ctx.model && { provider: ctx.model.provider, id: ctx.model.id });
       if (!model) throw new Error("Select a model before spawning a peep.");
       active.delivery.watch(ctx.signal);
@@ -157,7 +161,7 @@ export default function peeps(pi: ExtensionAPI): void {
     parameters: Type.Object({ id: Type.String(), message: Type.String({ minLength: 1 }) }),
     async execute(_id, params, signal, _update, ctx) {
       signal?.throwIfAborted();
-      const active = requireTui(ctx);
+      const active = requireLongLivedParent(ctx);
       active.delivery.watch(ctx.signal);
       const admission = await active.manager.send(params.id, params.message);
       return result({ ...summary(active.manager.get(params.id)!), admission: admission ?? null });
@@ -169,7 +173,7 @@ export default function peeps(pi: ExtensionAPI): void {
     parameters: Type.Object({ id: Type.String() }),
     async execute(_id, params, signal, _update, ctx) {
       signal?.throwIfAborted();
-      const active = requireTui(ctx);
+      const active = requireLongLivedParent(ctx);
       const outcome = await active.manager.interrupt(params.id);
       return result({ ...summary(active.manager.get(params.id)!), ...outcome });
     },
@@ -206,7 +210,7 @@ export default function peeps(pi: ExtensionAPI): void {
     description: "Close one child or all children (id: all), aborting any work in progress and freeing its process. Idempotent; no notice follows. A later peeps_send resumes it. Shared file edits are not rolled back.",
     parameters: Type.Object({ id: Type.String() }),
     async execute(_id, params, _signal, _update, ctx) {
-      await requireTui(ctx).manager.closeChild(params.id);
+      await requireLongLivedParent(ctx).manager.closeChild(params.id);
       return result({ id: params.id, closed: true });
     },
   });
@@ -217,10 +221,10 @@ export default function peeps(pi: ExtensionAPI): void {
         const words = args.trim().split(/\s+/).filter(Boolean);
         if (words[0] === "close") {
           if (words.length !== 2) throw new Error("Usage: /peeps close <id|all>");
-          await requireTui(ctx).manager.closeChild(words[1]!);
+          await requireLongLivedParent(ctx).manager.closeChild(words[1]!);
         } else if (words[0] === "interrupt") {
           if (words.length !== 2) throw new Error("Usage: /peeps interrupt <id>");
-          await requireTui(ctx).manager.interrupt(words[1]!);
+          await requireLongLivedParent(ctx).manager.interrupt(words[1]!);
         } else {
           if (words.length > 1) throw new Error("Usage: /peeps [id]");
           await view(ctx, words[0]);
