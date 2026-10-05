@@ -1,5 +1,9 @@
 # Peeps
 
+<p align="center">
+  <img src="assets/banner.png" alt="Peeps: subagents for Pi. Delegate, message, and watch threads live." width="100%">
+</p>
+
 Subagents for [Pi](https://github.com/earendil-works/pi).
 
 Your main agent hands tasks to background agents and keeps working. Each answer comes back automatically, and you can watch any subagent's thread live without leaving your session.
