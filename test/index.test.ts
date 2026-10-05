@@ -16,6 +16,7 @@ function harness() {
   const hooks = new Map<string, (...args: any[]) => any>();
   const tools = new Map<string, ToolDefinition<any, any>>();
   const commands = new Map<string, { handler: (...args: any[]) => Promise<void> }>();
+  const renderers = new Map<string, (...args: any[]) => any>();
   const notices: unknown[] = [], sendOptions: unknown[] = [], widgets: unknown[] = [], notifications: string[] = [];
   const session = SessionManager.inMemory("/tmp");
   const ctx = {
@@ -30,7 +31,7 @@ function harness() {
     registerTool: (tool: ToolDefinition<any, any>) => tools.set(tool.name, tool),
     registerCommand: (name: string, command: any) => commands.set(name, command),
     registerShortcut: () => {},
-    registerMessageRenderer: () => {},
+    registerMessageRenderer: (type: string, renderer: (...args: any[]) => any) => renderers.set(type, renderer),
     appendEntry: (type: string, data: unknown) => session.appendCustomEntry(type, data),
     sendMessage: (notice: unknown, options: unknown) => { notices.push(notice); sendOptions.push(options); },
   } as unknown as ExtensionAPI;
@@ -40,7 +41,7 @@ function harness() {
     const tool = tools.get(name)!;
     return tool.execute("test-call", params, signal, undefined, ctx as any);
   };
-  return { hooks, tools, commands, notices, sendOptions, widgets, ctx, session, emit, call, notifications };
+  return { hooks, tools, commands, renderers, notices, sendOptions, widgets, ctx, session, emit, call, notifications };
 }
 const task = { task: "isolated task" };
 
@@ -294,5 +295,58 @@ test("actual peeps_send wiring watches the turn signal and admits through the ma
   const status = await settle(h, (later.details as any).id);
   assert.equal((status.details as any).delivery, "held");
   assert.equal(h.notices.length, noticesBefore);
+  await h.emit("session_shutdown");
+});
+
+for (const boundary of ["turn_end", "agent_settled"]) test(`actual index ${boundary} flushes one batch`, async () => {
+  const h = harness();
+  h.ctx.isIdle = () => false;
+  await h.emit("session_start");
+  await h.emit("agent_start");
+  for (let i = 0; i < 2; i++) {
+    const spawned = await h.call("peeps_spawn", task);
+    await settle(h, (spawned.details as any).id);
+  }
+  assert.equal(h.notices.length, 0);
+  await h.emit(boundary);
+  assert.equal(h.notices.length, 1);
+  assert.equal((h.notices[0] as any).details.results.length, 2);
+  assert.deepEqual(h.sendOptions[0], { deliverAs: "steer", triggerTurn: true });
+  await h.emit("session_shutdown");
+});
+
+test("result renderer shows batch count, singleton and legacy titles, and full expanded content", () => {
+  const h = harness();
+  const render = h.renderers.get(RESULT_TYPE)!;
+  const item = { runId: "1234567890", seq: 1, status: "answer" };
+  const content = "[Peeps automated result — 1234567890 — answer]\n  exact text  \n\nsecond report";
+  const theme = { fg: (_color: string, text: string) => text };
+  for (const [details, title] of [
+    [{ owner: "owner", results: [item, { ...item, runId: "two" }] }, "Peeps · 2 results"],
+    [{ owner: "owner", results: [item] }, "Peeps · 12345678 · answer"],
+    [{ owner: "owner", ...item }, "Peeps · 12345678 · answer"],
+  ] as const) {
+    const collapsed = render({ details, content }, { expanded: false, outputPad: 0 }, theme).render(200).join("\n");
+    assert.ok(collapsed.startsWith(title));
+    assert.ok(!collapsed.includes("exact text"));
+    const expanded = render({ details, content }, { expanded: true, outputPad: 0 }, theme).render(200).join("\n");
+    assert.ok(expanded.startsWith(title));
+    assert.ok(expanded.includes("  exact text  "));
+    assert.ok(expanded.includes("second report"));
+  }
+});
+
+test("idle delivery does not wait for a settled event during standalone manual compaction", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = harness();
+  await h.emit("session_start");
+  // Pi's isIdle() includes manual compaction, which has no agent_start/settled pair.
+  h.ctx.isIdle = () => false;
+  const spawned = await h.call("peeps_spawn", task);
+  await settle(h, (spawned.details as any).id);
+  assert.equal(h.notices.length, 0);
+  t.mock.timers.tick(1_000);
+  assert.equal(h.notices.length, 1);
+  assert.deepEqual(h.sendOptions[0], { deliverAs: "steer", triggerTurn: true });
   await h.emit("session_shutdown");
 });

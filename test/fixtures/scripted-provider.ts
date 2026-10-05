@@ -268,6 +268,7 @@ export default function scriptedProviderExtension(pi: ExtensionAPI): void {
       const directory = testDir();
       if (!directory) throw new Error("PEEPS_TEST_DIR is not set");
       writeFileSync(join(directory, "gate-started"), params.tag);
+      writeFileSync(join(directory, `gate-started-${process.pid}`), params.tag);
       const release = join(directory, "release");
       const deadline = Date.now() + GATE_TIMEOUT_MS;
       while (Date.now() < deadline) {

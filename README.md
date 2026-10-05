@@ -5,7 +5,7 @@ Subagents for [Pi](https://github.com/earendil-works/pi).
 Your main agent hands tasks to background agents and keeps working. Each answer comes back automatically, and you can watch any subagent's thread live without leaving your session.
 
 - **Delegate in plain language.** Ask the main agent to split up work; it starts subagents as needed.
-- **No polling.** Each answer reaches the main agent as soon as it's ready.
+- **No polling.** Answers arrive automatically; results finishing together arrive as one notice.
 - **Just talk to them.** The main agent messages a subagent the way you'd type into Pi: a working subagent takes it as steering, an idle one picks up where it left off, and a closed one wakes up with its conversation intact.
 - **Watch live.** Open any subagent's thread in a read-only viewer inside Pi.
 

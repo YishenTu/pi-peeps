@@ -10,7 +10,7 @@ import { readArchive, readRunRecords } from "./archive.ts";
 import { buildLaunch, validateChildState } from "./launch.ts";
 import { RpcProcess } from "./rpc-process.ts";
 import { RunManager } from "./run-manager.ts";
-import { RESULT_TYPE, ResultDelivery, type ResultDetails } from "./delivery.ts";
+import { RESULT_TYPE, ResultDelivery, type ResultDetails, type LegacyResultDetails } from "./delivery.ts";
 import { closeAllViewers, mountOverview, openViewer } from "./ui/index.ts";
 import type { RunView } from "./contracts.ts";
 
@@ -42,6 +42,10 @@ export default function peeps(pi: ExtensionAPI): void {
   if (process.env.PI_PEEPS_CHILD === "1") return;
   let runtime: Runtime | undefined;
   let viewerOpen = false;
+  // Busy spans agent_start..agent_settled, covering post-run retries/automatic compaction.
+  // Not ctx.isIdle(): it is false during standalone manual compaction, which never emits
+  // agent_settled, so idle-buffered results would be stranded.
+  let parentBusy = false;
 
   async function stop(): Promise<void> {
     const old = runtime;
@@ -88,6 +92,7 @@ export default function peeps(pi: ExtensionAPI): void {
     }, readRunRecords(ctx.sessionManager.getBranch()));
     const delivery = new ResultDelivery({
       owner,
+      isIdle: () => !parentBusy,
       active: anchor => alive() && (anchor === null || ctx.sessionManager.getBranch().some(e => e.id === anchor)),
       branch: () => ctx.sessionManager.getBranch(),
       send: (message, options) => pi.sendMessage(message, options),
@@ -123,7 +128,7 @@ export default function peeps(pi: ExtensionAPI): void {
     start(ctx); // Historical overview remains usable if another handler cancels navigation.
   });
   pi.on("session_tree", async (_event, ctx) => { await stop(); start(ctx); });
-  pi.on("agent_start", (_event, ctx) => { runtime?.delivery.watch(ctx.signal); });
+  pi.on("agent_start", (_event, ctx) => { parentBusy = true; runtime?.delivery.watch(ctx.signal); });
   pi.on("input", (event) => { runtime?.delivery.input(event.source); });
   pi.on("before_agent_start", () => { runtime?.delivery.beforeAgentStart(); runtime?.delivery.reconcile(); });
   pi.on("message_end", (event) => {
@@ -133,7 +138,12 @@ export default function peeps(pi: ExtensionAPI): void {
       setImmediate(() => { if (runtime === current) current?.delivery.reconcile(); });
     }
   });
-  pi.on("agent_settled", () => { runtime?.delivery.reconcile(true); });
+  pi.on("turn_end", () => { runtime?.delivery.flush(); });
+  pi.on("agent_settled", () => {
+    parentBusy = false;
+    runtime?.delivery.reconcile(true);
+    runtime?.delivery.flush();
+  });
 
   pi.registerTool({
     name: "peeps_spawn", label: "Spawn peep", outputSchema: output,
@@ -233,9 +243,12 @@ export default function peeps(pi: ExtensionAPI): void {
     },
   });
   pi.registerShortcut("ctrl+shift+a", { description: "Open Peeps", handler: ctx => view(ctx) });
-  pi.registerMessageRenderer<ResultDetails>(RESULT_TYPE, (message, options, theme) => {
+  pi.registerMessageRenderer<ResultDetails | LegacyResultDetails>(RESULT_TYPE, (message, options, theme) => {
     const details = message.details;
-    const title = theme.fg("accent", `Peeps · ${details?.runId?.slice(0, 8) ?? "result"} · ${details?.status ?? "answer"}`);
+    const results = details && "results" in details ? details.results : details ? [details] : [];
+    const first = results[0];
+    const title = theme.fg("accent", results.length > 1 ? `Peeps · ${results.length} results`
+      : `Peeps · ${first?.runId?.slice(0, 8) ?? "result"} · ${first?.status ?? "answer"}`);
     const text = typeof message.content === "string" ? message.content : message.content.filter(b => b.type === "text").map(b => b.text).join("");
     return new Text(options.expanded ? `${title}\n${text}` : `${title}\n${theme.fg("dim", "Automated child result · expand for full text · /peeps for thread")}`, options.outputPad, 0);
   });

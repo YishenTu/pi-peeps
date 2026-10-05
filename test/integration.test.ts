@@ -26,7 +26,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
@@ -592,14 +592,13 @@ const eventMessage = (record: RpcRecord) => record.message as { role?: string; c
 const isResultNotice = (record: RpcRecord) =>
   eventMessage(record)?.role === "custom" && eventMessage(record)?.customType === RESULT_TYPE;
 
-test("an RPC-mode parent spawns a child and is woken by its result like a TUI parent", { timeout: TEST_TIMEOUT_MS }, async (t) => {
+for (const childCount of [1, 2]) test(`an RPC-mode parent receives ${childCount} child results as one notice and one idle wake`, { timeout: TEST_TIMEOUT_MS }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "peeps-integration-rpc-parent-"));
   const agentDir = join(root, "agent");
   const workspace = join(root, "workspace");
   const testDir = join(root, "script");
   await Promise.all([mkdir(agentDir), mkdir(workspace), mkdir(testDir)]);
   await writeAgentSettings(agentDir);
-  await writeFile(join(testDir, "release"), "go"); // The child's gate passes at once.
   const childFinal = `RPC-PARENT-CHILD-FINAL-${root.slice(-8)}`;
 
   // Like an embedding client (Claudian): a parent `pi --mode rpc` driven over stdio.
@@ -613,6 +612,7 @@ test("an RPC-mode parent spawns a child and is woken by its result like a TUI pa
     cwd: workspace, stdio: ["pipe", "pipe", "pipe"],
     env: {
       PATH: process.env.PATH, HOME: root, PI_OFFLINE: "1", PI_CODING_AGENT_DIR: agentDir,
+      PEEPS_TEST_CHILD_COUNT: String(childCount),
       PEEPS_TEST_DIR: testDir, PEEPS_SCRIPT_JSON: JSON.stringify({ finalText: childFinal, steerToken: "unused", gateTag: "rpc-parent" }),
     },
   });
@@ -635,11 +635,14 @@ test("an RPC-mode parent spawns a child and is woken by its result like a TUI pa
     await rm(root, { recursive: true, force: true });
   });
 
-  parent.stdin.write(JSON.stringify({ id: "prompt-1", type: "prompt", message: "Delegate one task" }) + "\n");
+  parent.stdin.write(JSON.stringify({ id: "prompt-1", type: "prompt", message: `Delegate ${childCount} tasks` }) + "\n");
   const diagnostics = () => `stderr: ${stderr}\nrecords: ${records.map((r) => r.type + (eventMessage(r)?.role ? ":" + eventMessage(r)!.role : "")).join(", ")}`;
-  await waitFor(() => records.some((r) => r.type === "tool_execution_end" && r.toolName === "peeps_spawn"), "peeps_spawn never finished");
-  const spawnEnd = records.find((r) => r.type === "tool_execution_end" && r.toolName === "peeps_spawn")!;
-  assert.equal(spawnEnd.isError, false, `RPC parent rejected peeps_spawn: ${JSON.stringify(spawnEnd.result)}`);
+  const spawns = () => records.filter((r) => r.type === "tool_execution_end" && r.toolName === "peeps_spawn");
+  await waitFor(() => spawns().length === childCount, "peeps_spawn never finished");
+  for (const spawned of spawns()) assert.equal(spawned.isError, false, `RPC parent rejected peeps_spawn: ${JSON.stringify(spawned.result)}`);
+  const childPids = () => readdirSync(testDir).filter(name => name.startsWith("gate-started-")).map(name => Number(name.slice("gate-started-".length)));
+  await waitFor(() => childPids().length === childCount && records.some(r => r.type === "agent_settled"), "children never reached their gates or parent never settled");
+  await writeFile(join(testDir, "release"), "go"); // Release both children together after the parent is idle.
 
   // The result wakes the idle parent: a new run starts from the notice alone.
   await waitFor(() => records.filter((r) => r.type === "agent_settled").length >= 2, `the result never woke the parent\n${diagnostics()}`);
@@ -655,18 +658,25 @@ test("an RPC-mode parent spawns a child and is woken by its result like a TUI pa
     "no fabricated prompt: only the client's own prompt was admitted");
 
   const notice = records.find((r) => r.type === "message_end" && isResultNotice(r))!.message;
+  assert.equal(records.filter(r => r.type === "message_end" && isResultNotice(r)).length, 1);
+  assert.equal(records.filter(r => r.type === "agent_start").length, 2, "one spawning run and one result wake");
   assert.equal(notice.display, true);
-  assert.equal(notice.content, `[Peeps automated result \u2014 ${spawnEnd.result.details.id} \u2014 answer]\n${childFinal}`);
-  assert.equal(notice.details.runId, spawnEnd.result.details.id);
-  assert.equal(notice.details.seq, 1);
-  assert.equal(notice.details.status, "answer");
+  const results = notice.details.results as { runId: string; seq: number; status: string; sessionFile: string }[];
+  assert.equal(results.length, childCount);
+  assert.deepEqual(results.map(r => r.runId).sort(), spawns().map(r => r.result.details.id).sort());
+  assert.equal(notice.content, results.map(r => `[Peeps automated result \u2014 ${r.runId} \u2014 answer]\n${childFinal}`).join("\n\n"));
+  for (const result of results) {
+    assert.equal(result.seq, 1);
+    assert.equal(result.status, "answer");
+    assert.equal(typeof result.sessionFile, "string");
+  }
   const reply = records.filter((r) => r.type === "message_end" && eventMessage(r)?.role === "assistant").at(-1)!.message;
   assert.equal(textOf(reply), "PARENT-RECEIVED", "the parent model saw the notice");
 
   // Closing the client's stdin shuts the parent down, which closes its children.
-  const childPid = Number(await readFile(join(testDir, "child.pid"), "utf8"));
-  assert.ok(processAlive(childPid), "an idle child stays alive with its parent");
+  const pids = childPids();
+  assert.ok(pids.every(processAlive), "idle children stay alive with their parent");
   parent.stdin.end();
   await exited;
-  await waitFor(() => !processAlive(childPid), "child outlived its RPC parent", 10_000);
+  await waitFor(() => pids.every(pid => !processAlive(pid)), "child outlived its RPC parent", 10_000);
 });
