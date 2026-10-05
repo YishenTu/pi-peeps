@@ -8,7 +8,8 @@ installed() { pi list | sed -n 's/^    //p'; }
 installed | while IFS= read -r path; do
   [ -f "$path/package.json" ] || continue
   [ "$(node -p "require(process.argv[1]).name" "$path/package.json" 2>/dev/null)" = pi-peeps ] || continue
-  [ "$(cd "$path" && pwd -P)" = "$target" ] && continue
+  # Compare listed paths, not resolved ones: a symlinked entry still loads a second copy.
+  [ "$path" = "$target" ] && continue
   pi remove "$path"
 done
 installed | grep -qxF "$target" || pi install "$target"
