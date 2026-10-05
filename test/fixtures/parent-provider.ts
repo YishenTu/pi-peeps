@@ -12,9 +12,10 @@ export default function(pi: ExtensionAPI) {
       const stream = createAssistantMessageEventStream();
       const spawned = context.messages.some(m => m.role === "toolResult");
       const notice = context.messages.some(m => m.role === "user" && JSON.stringify(m.content).includes("Peeps automated result"));
+      const childCount = process.env.PEEPS_TEST_CHILD_COUNT === "2" ? 2 : 1;
       const message: AssistantMessage = {
         role:"assistant",api:model.api,provider:model.provider,model:model.id,timestamp:Date.now(),
-        content: spawned ? [{type:"text",text:notice?"PARENT-RECEIVED":"PARENT-WAITING"}] : [{type:"toolCall",id:"spawn-ui",name:"peeps_spawn",arguments:{task:"UI child task",label:"UI-peep"}}],
+        content: spawned ? [{type:"text",text:notice?"PARENT-RECEIVED":"PARENT-WAITING"}] : Array.from({ length: childCount }, (_, i) => ({type:"toolCall" as const,id:`spawn-ui-${i}`,name:"peeps_spawn",arguments:{task:"UI child task",label:`UI-peep-${i}`}})),
         stopReason:spawned?"stop":"toolUse",
         usage:{input:1,output:1,cacheRead:0,cacheWrite:0,totalTokens:2,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}
       };

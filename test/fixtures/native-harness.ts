@@ -96,6 +96,7 @@ export interface CustomNoticeMessage {
 
 export interface SceneOptions {
   plans?: Plan[];
+  afterTurnEnd?: (session: AgentSession) => void;
 }
 
 export interface Scene {
@@ -182,6 +183,7 @@ export async function createScene(t: TestContext, options: SceneOptions = {}): P
   const runs = new Map<string, RunView>();
   let beforeStarts = 0;
   let starts = 0;
+  let parentBusy = false;
   let settles = 0;
   let extensionAPI: ExtensionAPI | undefined;
   let wiredOnLoad = false;
@@ -280,6 +282,7 @@ export async function createScene(t: TestContext, options: SceneOptions = {}): P
     let self: { delivery: ResultDelivery; owner: string };
     const delivery = new ResultDelivery({
       owner,
+      isIdle: () => !parentBusy,
       active: (anchor) =>
         current === self && (anchor === null || manager.getBranch().some((entry) => entry.id === anchor)),
       branch: () => manager.getBranch(),
@@ -321,6 +324,7 @@ export async function createScene(t: TestContext, options: SceneOptions = {}): P
         pi.on("agent_start", (_event, ctx) => {
           wire(ctx);
           starts++;
+          parentBusy = true;
           current?.delivery.watch(ctx.signal);
         });
         pi.on("input", (event) => {
@@ -340,8 +344,14 @@ export async function createScene(t: TestContext, options: SceneOptions = {}): P
             });
           }
         });
+        pi.on("turn_end", () => {
+          current?.delivery.flush();
+          options.afterTurnEnd?.(session);
+        });
         pi.on("agent_settled", () => {
+          parentBusy = false;
           current?.delivery.reconcile(true);
+          current?.delivery.flush();
         });
       },
     ],

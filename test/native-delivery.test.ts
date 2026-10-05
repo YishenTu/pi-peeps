@@ -30,7 +30,7 @@ function noticeContent(id: string, status: string, body: string): string {
   return "[Peeps automated result \u2014 " + id + " \u2014 " + status + "]\n" + body;
 }
 
-test("busy result steers at the boundary with the exact custom text", { timeout: TIMEOUT_MS }, async (t) => {
+test("two busy results steer as one notice and one continuation at the boundary with exact text", { timeout: TIMEOUT_MS }, async (t) => {
   const gate = latch();
   const scene = await createScene(t, { plans: [{ gate, text: "parent-working" }, { text: "parent-after-notice" }] });
   const body = "FINAL_CHILD_RESPONSE: fixed auth\nExact punctuation: <>& \u4e2d\u6587 \u2705\n  keep trailing  ";
@@ -41,9 +41,10 @@ test("busy result steers at the boundary with the exact custom text", { timeout:
 
   assert.equal(scene.session.isIdle, false, "precondition: the parent turn is busy");
   scene.offer(run);
+  const second = scene.run("run-busy-two", "  SECOND\nexact  ");
+  scene.offer(second);
 
-  assert.equal(scene.sent.length, 1, "busy result is handed to native steering immediately");
-  assert.deepEqual(scene.sent[0]?.options, { deliverAs: "steer", triggerTurn: true });
+  assert.equal(scene.sent.length, 0, "busy results stay in Peeps until turn_end");
   assert.equal(scene.requests.length, 1, "the notice must not enter the in-flight request");
   assert.equal(
     scene.requests[0]?.messages.some((message) => textOf(message).includes("FINAL_CHILD_RESPONSE")),
@@ -54,7 +55,9 @@ test("busy result steers at the boundary with the exact custom text", { timeout:
   await turn;
 
   assert.equal(scene.requests.length, 2, "the notice pins one boundary request");
-  const expected = noticeContent("run-busy", "answer", body);
+  assert.equal(scene.sent.length, 1);
+  assert.deepEqual(scene.sent[0]?.options, { deliverAs: "steer", triggerTurn: true });
+  const expected = noticeContent("run-busy", "answer", body) + "\n\n" + noticeContent(second.id, "answer", second.finalText!);
   const delivered = scene.requests[1]?.messages.filter((message) => textOf(message) === expected) ?? [];
   assert.equal(delivered.length, 1, "exactly one provider-facing copy");
   assert.equal(delivered[0]?.role, "user", "provider sees the custom notice as a user-role message");
@@ -66,6 +69,7 @@ test("busy result steers at the boundary with the exact custom text", { timeout:
   assert.equal(notices[0]?.content, expected, "transcript text is exact and untruncated");
   assert.equal(notices[0]?.content, scene.sent[0]?.message.content, "sent and appended text are identical");
   assert.equal(run.delivery, "appended", "settled reconcile confirms the native append");
+  assert.equal(second.delivery, "appended");
 });
 
 test("idle result automatically starts a provider call without a user prompt", { timeout: TIMEOUT_MS }, async (t) => {
@@ -94,13 +98,16 @@ test("idle result automatically starts a provider call without a user prompt", {
   assert.equal(run.delivery, "appended");
 });
 
-test("Stop holds later results until an interactive prompt drains them as nextTurn", { timeout: TIMEOUT_MS }, async (t) => {
+test("Stop holds buffered and later results until one interactive nextTurn batch", { timeout: TIMEOUT_MS }, async (t) => {
   const gate = latch();
   const scene = await createScene(t, { plans: [{ gate, text: "working" }, { text: "resumed" }] });
   const body = "STOPPED-THEN-RESUMED";
 
   const turn = scene.session.prompt("Work until stopped.");
   await gate.entered.promise;
+  const buffered = scene.run("run-buffered", "BEFORE-STOP");
+  scene.offer(buffered);
+  assert.equal(scene.sent.length, 0);
   await scene.session.abort();
   await turn;
   assert.equal(scene.session.isIdle, true);
@@ -110,41 +117,68 @@ test("Stop holds later results until an interactive prompt drains them as nextTu
 
   assert.equal(scene.sent.length, 0, "held result is not handed to native delivery while stopped");
   assert.equal(run.delivery, "held");
+  assert.equal(buffered.delivery, "held");
   assert.equal(scene.requests.length, 1, "a held result never wakes the provider on its own");
 
   await scene.session.prompt("Continue please.");
 
   assert.equal(scene.sent.length, 1, "the ordinary prompt drains exactly one held notice");
   assert.deepEqual(scene.sent[0]?.options, { deliverAs: "nextTurn", triggerTurn: false });
-  const expected = noticeContent("run-held", "answer", body);
+  const expected = noticeContent(buffered.id, "answer", buffered.finalText!) + "\n\n" + noticeContent("run-held", "answer", body);
   const delivered = scene.requests[1]?.messages.filter((message) => textOf(message) === expected) ?? [];
   assert.equal(delivered.length, 1);
   assert.equal(delivered[0]?.role, "user");
   assert.equal(scene.notices().length, 1);
   assert.equal(scene.notices()[0]?.content, expected);
   assert.equal(run.delivery, "appended");
+  assert.equal(buffered.delivery, "appended");
+});
+
+test("a result during standalone manual compaction is not stranded waiting for agent_settled", { timeout: TIMEOUT_MS }, async t => {
+  const gate = latch();
+  const scene = await createScene(t, { plans: [
+    { text: "first" }, { text: "long ".repeat(25_000) }, { gate, text: "compacted summary" }, { text: "parent-after-result" },
+  ] });
+  await scene.session.prompt("Initial prompt.");
+  await scene.session.prompt("Enough history to compact.");
+  const settles = scene.settles;
+  const compact = scene.session.compact();
+  await gate.entered.promise;
+  assert.equal(scene.session.isIdle, false, "public isIdle includes manual compaction");
+  const run = scene.run("during-compact", "child answer");
+  scene.offer(run);
+  gate.release.resolve();
+  await compact;
+  assert.equal(scene.settles, settles, "manual compaction has no agent_settled event");
+  await scene.waitFor(() => scene.settles > settles, "automatic result wake after manual compaction");
+  assert.equal(scene.sent.length, 1);
+  assert.equal(scene.notices()[0]?.content, noticeContent(run.id, "answer", run.finalText!));
+  assert.equal(run.delivery, "appended");
 });
 
 test("native clearQueue loss leaves a queued notice unconfirmed and never resent", { timeout: TIMEOUT_MS }, async (t) => {
   const gate = latch();
-  const scene = await createScene(t, { plans: [{ gate }, { text: "resumed" }] });
+  let cleared: ReturnType<import("@earendil-works/pi-coding-agent").AgentSession["clearQueue"]> | undefined;
+  const scene = await createScene(t, { plans: [{ gate }, { text: "resumed" }],
+    afterTurnEnd: session => { cleared = session.clearQueue(); },
+  });
   const body = "LOST-IN-NATIVE-QUEUE";
   const run = scene.run("run-lost", body);
 
   const turn = scene.session.prompt("Parent working.");
   await gate.entered.promise;
   scene.offer(run);
-  assert.equal(scene.sent.length, 1);
-  assert.equal(run.delivery, "queued");
+  assert.equal(scene.sent.length, 0);
+  assert.equal(run.delivery, "none");
 
   // Known host caveat (#9886): clearQueue drops the custom steer message without
   // reporting it, and Pi does not restore or resend it. Peeps records it as
   // unconfirmed rather than fabricating a second delivery.
-  const cleared = scene.session.clearQueue();
-  assert.equal(cleared.steering.length, 0, "custom results are invisible to the text queue report");
-  assert.equal(cleared.followUp.length, 0);
   gate.release.resolve();
   await turn;
+  assert.equal(scene.sent.length, 1);
+  assert.equal(cleared?.steering.length, 0, "custom results are invisible to the text queue report");
+  assert.equal(cleared?.followUp.length, 0);
 
   assert.equal(run.delivery, "unconfirmed", "a settled queued notice absent from the branch is unconfirmed");
   assert.equal(scene.requests.length, 1, "the cleared notice never reached the provider");
