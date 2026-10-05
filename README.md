@@ -9,6 +9,18 @@ Your main agent hands tasks to background agents and keeps working. Each answer 
 - **Just talk to them.** The main agent messages a subagent the way you'd type into Pi: a working subagent takes it as steering, an idle one picks up where it left off, and a closed one wakes up with its conversation intact.
 - **Watch live.** Open any subagent's thread in a read-only viewer inside Pi.
 
+## Compared with other Pi subagent extensions
+
+As of October 2026:
+
+| | Peeps | [Pi's example](https://github.com/earendil-works/pi/tree/main/packages/coding-agent/examples/extensions/subagent) | [pi-subagents](https://github.com/nicobailon/pi-subagents) | [@tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents) | [pi-agent-teams](https://github.com/FradSer/pi-packages) |
+| --- | --- | --- | --- | --- | --- |
+| Subagent runs as | Its own Pi process | Its own Pi process | Inside the main Pi process | Inside the main Pi process | Its own Pi process |
+| Task arrives as | A plain message | A plain message | A plain message | A plain message | A role-and-task envelope |
+| Sees the main conversation | Never | No | Optional | Optional | Optional |
+| Messages after the task | Any time; resumes after close or restart | No | Steer, resume | Steer, resume | Steer, follow-up |
+| Answer comes back as | Its final reply, delivered mid-turn or waking the main agent | A tool result the main agent waits on | A tool result, or a background notice | A tool result, or a notice after the main agent's turn | Whatever the subagent submits with a work tool |
+
 ## Install
 
 ```sh
