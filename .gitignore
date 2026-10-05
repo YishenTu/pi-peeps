@@ -1,0 +1,4 @@
+node_modules/
+.context/
+coverage/
+.DS_Store
