@@ -28,7 +28,8 @@
   "scripts": {
     "check": "tsc --noEmit",
     "test": "node --test --test-concurrency=1 test/*.test.ts",
-    "test:tui": "python3 test/tui-smoke.py \"$(command -v node)\""
+    "test:tui": "python3 test/tui-smoke.py \"$(command -v node)\"",
+    "pi": "bash scripts/pi-use.sh"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

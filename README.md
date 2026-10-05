@@ -57,7 +57,7 @@ Some delivery edge cases come from Pi itself: [#5581](https://github.com/earendi
 
 ## Development
 
-Install your checkout with `pi install /absolute/path/to/pi-peeps`; Pi loads it in place, so `/reload` picks up code changes.
+Run `npm run pi` in a checkout or worktree to make your Pi load Peeps from it (the last one run wins), then `/reload`. Pi loads it in place, so `/reload` also picks up later code changes.
 
 ```sh
 npm ci --ignore-scripts

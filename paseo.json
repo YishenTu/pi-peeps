@@ -9,6 +9,9 @@
     },
     "test": {
       "command": "npm test"
+    },
+    "pi": {
+      "command": "npm run pi"
     }
   }
 }
