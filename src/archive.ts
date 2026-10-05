@@ -27,7 +27,12 @@ import type { DeliveryStatus, RunStatus, RunView } from "./contracts.ts";
 const ARCHIVE_DIR_NAME = "peeps";
 /** Inspection ceiling, not a task/output limit. The full native file is retained. */
 export const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
-const archiveTooLarge = () => new Error("Child archive too large to display (maximum 64 MiB). The native JSONL remains available on disk.");
+export class ArchiveTooLargeError extends Error {
+  constructor() {
+    super("Child archive too large to display (maximum 64 MiB). The native JSONL remains available on disk.");
+    this.name = "ArchiveTooLargeError";
+  }
+}
 
 /** Custom-entry type that persists one run record in the owning session. */
 export const RUN_RECORD_TYPE = "peeps/run";
@@ -328,7 +333,7 @@ async function resolveArchiveFile(sessionFile: string, allowedRoot: string): Pro
   if (!info.isFile()) {
     throw new Error(`child session archive is not a file: ${sessionFile}`);
   }
-  if (info.size > MAX_ARCHIVE_BYTES) throw archiveTooLarge();
+  if (info.size > MAX_ARCHIVE_BYTES) throw new ArchiveTooLargeError();
   return real;
 }
 
@@ -355,7 +360,7 @@ export async function readArchive(
   for await (const chunk of createReadStream(real, { start: 0, end: MAX_ARCHIVE_BYTES })) {
     const buffer = chunk as Buffer;
     bytes += buffer.length;
-    if (bytes > MAX_ARCHIVE_BYTES) throw archiveTooLarge();
+    if (bytes > MAX_ARCHIVE_BYTES) throw new ArchiveTooLargeError();
     chunks.push(buffer);
   }
   return selectHistoryMessages(parseSafeEntries(Buffer.concat(chunks, bytes).toString("utf8")));

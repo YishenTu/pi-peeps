@@ -4,7 +4,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { JsonAgentSessionEvent, RpcSessionState } from "@earendil-works/pi-coding-agent";
 import type { ChildConnection, DeliveryStatus, ModelChoice, Report, ReportStatus, RpcIncoming, RunStatus, RunView, SpawnTask, ViewSource } from "./contracts.ts";
 import { isTerminal } from "./contracts.ts";
-import type { RunRecord } from "./archive.ts";
+import { ArchiveTooLargeError, type RunRecord } from "./archive.ts";
 import { Transcript } from "./transcript.ts";
 
 export interface PreparedChild {
@@ -29,6 +29,8 @@ interface Run {
   /** The parent session that started it; only that session may resume it. */
   owner: string;
   reviving?: Promise<void>;
+  /** A close invalidates messages and resume preparation already in flight. */
+  closeVersion: number;
   idleTimer?: ReturnType<typeof setTimeout>;
   /** The parent interrupted this work; its stop is not news. */
   interrupting: boolean;
@@ -85,7 +87,7 @@ export class RunManager implements ViewSource {
       this.runs.set(view.id, { view, anchor: record.anchor, owner: record.owner, interrupting: false,
         ready: Promise.resolve(), markReady: () => {},
         pending: 0, settled: true, revision: 0, checking: false, historical: true, transcriptLoaded: false,
-        readers: 0, reportStart: 0 });
+        readers: 0, reportStart: 0, closeVersion: 0 });
     }
   }
   get closed(): boolean { return this.stopped; }
@@ -125,27 +127,32 @@ export class RunManager implements ViewSource {
     const ready = new Promise<void>(resolve => { markReady = resolve; });
     const run: Run = { view, anchor, owner: this.options.owner, interrupting: false, ready, markReady,
       pending: 0, settled: false, revision: 0, checking: false,
-      historical: false, transcriptLoaded: true, readers: 0, reportStart: 0 };
+      historical: false, transcriptLoaded: true, readers: 0, reportStart: 0, closeVersion: 0 };
     this.runs.set(view.id, run);
     this.changed(run, true);
-    void this.start(run).catch(error => this.finish(run, "failed", String(error))).finally(() => run.markReady());
+    const closeVersion = run.closeVersion;
+    void this.start(run).catch(error => {
+      if (closeVersion === run.closeVersion) return this.finish(run, "failed", String(error));
+    }).finally(markReady);
     return view;
   }
   private async start(run: Run, resume?: Resume): Promise<void> {
+    const closeVersion = run.closeVersion;
+    const cancelled = () => this.stopped || closeVersion !== run.closeVersion || isTerminal(run.view.status);
     const prepared = await this.options.createChild(run.view, resume);
-    run.child = prepared.connection;
-    if (this.stopped || isTerminal(run.view.status)) {
+    if (cancelled()) {
       await prepared.connection.close();
       return;
     }
-    run.child.onEvent(event => this.event(run, event));
+    run.child = prepared.connection;
+    run.child.onEvent(event => { if (!cancelled()) this.event(run, event); });
     run.child.onExit(exit => {
-      if (isTerminal(run.view.status)) return;
+      if (cancelled()) return;
       void this.finish(run, "failed", `Child exited (${exit.error ?? `code ${exit.code}, signal ${exit.signal}`}).`);
     });
     run.child.start();
     const state = await run.child.request({ type: "get_state" }, 60_000);
-    if (isTerminal(run.view.status) || this.stopped) return;
+    if (cancelled()) return;
     const validated = prepared.validateState(state);
     run.view.sessionFile = validated.sessionFile;
     run.view.sessionId = validated.sessionId;
@@ -154,6 +161,7 @@ export class RunManager implements ViewSource {
     this.changed(run, true);
     if (resume) return; // The message that woke it is the first prompt.
     const result = await this.prompt(run, run.view.task);
+    if (cancelled()) return;
     run.markReady();
     if (disposition(result) === "handled" && run.view.status === "starting") {
       // A consumed task starts no agent run, so the parent would otherwise wait forever.
@@ -221,19 +229,23 @@ export class RunManager implements ViewSource {
     const run = this.require(id);
     if (!message.trim()) throw new Error("Message must not be empty.");
     if (this.stopped) throw new Error("Peeps owner is closed.");
+    const closeVersion = run.closeVersion;
     if (isTerminal(run.view.status)) await this.revive(run);
     await run.ready; // Queue behind the task prompt while the child starts.
+    if (closeVersion !== run.closeVersion) throw new Error("Peep was closed before the message was admitted.");
     if (this.stopped || isTerminal(run.view.status)) {
       throw new Error(`Cannot message a ${run.view.status} peep${run.view.error ? `: ${run.view.error}` : "."}`);
     }
     this.clearIdleTimer(run);
     const result = await this.prompt(run, message);
-    if (disposition(result) === "handled" && run.view.status === "starting") {
-      // A resumed child consumed its waking message: it is simply idle again.
-      run.view.status = "idle";
-      run.view.activity = "Idle";
-      this.changed(run, true);
-      this.armIdleClose(run);
+    if (disposition(result) === "handled") {
+      if (run.view.status === "starting") {
+        // A resumed child consumed its waking message: it is simply idle again.
+        run.view.status = "idle";
+        run.view.activity = "Idle";
+        this.changed(run, true);
+      }
+      if (run.view.status === "idle") this.armIdleClose(run);
     }
     return result;
   }
@@ -243,14 +255,27 @@ export class RunManager implements ViewSource {
    * so one session file never has two writers.
    */
   private revive(run: Run): Promise<void> {
-    run.reviving ??= (async () => {
+    if (run.reviving) return run.reviving;
+    const closeVersion = run.closeVersion;
+    const checkOpen = () => {
+      if (this.stopped) throw new Error("Peeps owner is closed.");
+      if (closeVersion !== run.closeVersion) throw new Error("Peep resume was cancelled by close.");
+    };
+    const reviving = (async () => {
       const { sessionFile, sessionId } = run.view;
       if (!sessionFile || !sessionId) throw new Error("This peep cannot resume: its parent session is ephemeral, so no child history was kept.");
       if (run.owner !== this.options.owner) throw new Error("This peep belongs to another parent session and cannot resume here.");
       await run.releasing;
+      checkOpen();
       const transcript = new Transcript();
-      transcript.restore(await this.options.readArchive(sessionFile));
-      if (this.stopped) throw new Error("Peeps owner is closed.");
+      try {
+        transcript.restore(await this.options.readArchive(sessionFile));
+      } catch (error) {
+        checkOpen();
+        if (!(error instanceof ArchiveTooLargeError)) throw error;
+        this.options.warn("Child archive too large to display; resuming with only new events in the viewer. Pi retains the full session history.");
+      }
+      checkOpen();
       let markReady!: () => void;
       run.ready = new Promise<void>(resolve => { markReady = resolve; });
       Object.assign(run, { markReady, historical: false, transcriptLoaded: true, child: undefined, releasing: undefined,
@@ -260,10 +285,13 @@ export class RunManager implements ViewSource {
         finishedAt: undefined, delivery: "none" });
       this.changed(run, true);
       void this.start(run, { sessionFile, sessionId })
-        .catch(error => this.finish(run, "failed", `Could not resume: ${String(error)}`))
-        .finally(() => run.markReady());
-    })().finally(() => { run.reviving = undefined; });
-    return run.reviving;
+        .catch(error => {
+          if (closeVersion === run.closeVersion) return this.finish(run, "failed", `Could not resume: ${String(error)}`);
+        })
+        .finally(markReady);
+    })().finally(() => { if (run.reviving === reviving) run.reviving = undefined; });
+    run.reviving = reviving;
+    return reviving;
   }
   /**
    * Stop the current work but keep the child and its context. Messages still
@@ -406,7 +434,11 @@ export class RunManager implements ViewSource {
   /** Close one child or all of them. Work in progress is aborted; no report is sent. */
   async closeChild(id: string): Promise<void> {
     const runs = id === "all" ? [...this.runs.values()] : [this.require(id)];
-    await Promise.all(runs.filter(r => !isTerminal(r.view.status)).map(run =>
+    for (const run of runs) {
+      run.closeVersion++;
+      run.reviving = undefined; // A later message may start a fresh resume.
+    }
+    await Promise.all(runs.map(run => isTerminal(run.view.status) ? run.releasing :
       this.finish(run, "closed", run.view.status === "idle" ? undefined : "Closed by the parent while working.")));
   }
   retainTranscript(id: string): () => void {
@@ -433,10 +465,13 @@ export class RunManager implements ViewSource {
     const run = this.require(id);
     if (run.transcriptLoaded) return;
     if (!run.view.sessionFile) throw new Error("No persistent child transcript (ephemeral parent or interrupted startup).");
+    const previous = run.view.transcript;
     const hadReader = run.readers > 0;
     await run.releasing; // Never read a child archive while its process is closing.
     const transcript = new Transcript();
     transcript.restore(await this.options.readArchive(run.view.sessionFile));
+    // A resume or another reader may have published a newer transcript during I/O.
+    if (run.view.transcript !== previous || run.transcriptLoaded) return;
     if (hadReader && run.readers === 0) return; // Viewer closed during the read.
     run.view.transcript = transcript;
     run.transcriptLoaded = true;

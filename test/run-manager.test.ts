@@ -1,11 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { setImmediate as tick } from "node:timers/promises";
+import { mkdtemp, mkdir, writeFile, truncate, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { RpcCommand, RpcExtensionUIResponse } from "@earendil-works/pi-coding-agent";
 import type { ChildConnection, ChildExit, Report, RpcIncoming } from "../src/contracts.ts";
 import { RunManager, type Resume } from "../src/run-manager.ts";
-import type { RunRecord } from "../src/archive.ts";
+import { readArchive, MAX_ARCHIVE_BYTES, type RunRecord } from "../src/archive.ts";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 const model = { provider: "fake", id: "scripted" };
@@ -52,6 +55,7 @@ interface SetupOptions {
   persistent?: boolean;
   idleCloseMs?: number;
   history?: RunRecord[];
+  readArchive?: (path: string) => Promise<readonly AgentMessage[]>;
 }
 function setup(options: SetupOptions = {}) {
   const children: FakeChild[] = [], reports: Report[] = [], records: RunRecord[] = [], warnings: string[] = [];
@@ -67,7 +71,7 @@ function setup(options: SetupOptions = {}) {
       const session = options.persistent ? { sessionFile: "/fake/child.jsonl", sessionId: "child-session" } : {};
       return { connection, validateState: () => ({ thinking: "off", ...session }) };
     },
-    readArchive: async () => archive, record: record => records.push(record),
+    readArchive: options.readArchive ?? (async () => archive), record: record => records.push(record),
     report: report => reports.push(report), warn: message => warnings.push(message),
     idleCloseMs: options.idleCloseMs,
   }, options.history);
@@ -495,4 +499,179 @@ test("idle resumable children close on their own and wake on the next message", 
   await new Promise(resolve => setTimeout(resolve, 60));
   assert.equal(kept.status, "idle", "without an archive, closing would lose its context");
   await ephemeral.manager.close();
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+test("an archive read started before resume cannot replace live events or report an old answer", async t => {
+  const read = deferred<AgentMessage[]>();
+  let reads = 0;
+  const h = setup({ persistent: true, readArchive: async () => ++reads === 1 ? read.promise : [answer("OLD ANSWER")] });
+  t.after(() => h.manager.close());
+  const run = h.manager.spawn({ task: "task" }, defaults, null);
+  await flush();
+  h.children[0]!.complete("OLD ANSWER");
+  await flush();
+  await h.manager.closeChild(run.id);
+  const release = h.manager.retainTranscript(run.id);
+  t.after(release);
+  const loading = h.manager.loadTranscript(run.id);
+  await flush();
+  await h.manager.send(run.id, "new task");
+  h.children[1]!.emit({ type: "agent_start" });
+  h.children[1]!.emit({ type: "message_end", message: answer("NEW ANSWER") });
+  read.resolve([answer("OLD ANSWER")]); // A different parsed object with the same old answer.
+  await loading;
+  h.children[1]!.emit({ type: "agent_settled" });
+  await flush();
+  assert.deepEqual(h.reports.map(r => r.text), ["OLD ANSWER", "NEW ANSWER"]);
+  assert.ok(run.transcript.items.some(i => i.kind === "message" && i.message.role === "assistant" &&
+    i.message.content.some(b => b.type === "text" && b.text === "NEW ANSWER")));
+});
+
+for (const waitAt of ["release", "archive"] as const) {
+  for (const closeAll of [false, true]) {
+    test(`close ${closeAll ? "all" : "one"} cancels concurrent sends awaiting resume ${waitAt}`, async t => {
+      const gate = deferred<void>();
+      let reads = 0;
+      const h = setup({ persistent: true, readArchive: async () => {
+        reads++;
+        if (waitAt === "archive" && reads === 1) await gate.promise;
+        return [answer("old")];
+      } });
+      t.after(() => h.manager.close());
+      const run = h.manager.spawn({ task: "task" }, defaults, null);
+      await flush();
+      h.children[0]!.complete("old");
+      await flush();
+      if (waitAt === "release") h.children[0]!.close = async () => { await gate.promise; h.children[0]!.closed = true; };
+      const initialClose = h.manager.closeChild(run.id);
+      await flush();
+      const sends = [h.manager.send(run.id, "cancel me"), h.manager.send(run.id, "cancel me too")];
+      // Observe rejection before releasing any gates.
+      const rejected = sends.map(send => assert.rejects(send, /closed|cancel/i));
+      await flush();
+      const closing = h.manager.closeChild(closeAll ? "all" : run.id);
+      gate.resolve();
+      await Promise.all([initialClose, closing, ...rejected]);
+      assert.equal(h.children.length, 1, "cancelled resume must not launch");
+      assert.equal(run.status, "closed");
+      assert.equal(h.reports.length, 1, "cancelling was the parent's request");
+      if (waitAt === "release") assert.equal(reads, 0, "check cancellation before archive I/O");
+      await h.manager.send(run.id, "later message");
+      assert.deepEqual(prompts(h.children[1]!), [["later message", "steer"]]);
+    });
+  }
+}
+
+test("a later message can resume before a cancelled archive read completes", { timeout: 2000 }, async t => {
+  const gate = deferred<AgentMessage[]>();
+  let reads = 0;
+  const h = setup({ persistent: true, readArchive: async () => ++reads === 1 ? gate.promise : [answer("old")] });
+  t.after(() => h.manager.close());
+  const run = h.manager.spawn({ task: "task" }, defaults, null);
+  await flush();
+  h.children[0]!.complete("old");
+  await flush();
+  await h.manager.closeChild(run.id);
+  const cancelled = assert.rejects(h.manager.send(run.id, "cancel me"), /closed|cancel/i);
+  await flush();
+  await h.manager.closeChild(run.id);
+  await h.manager.send(run.id, "later message");
+  gate.resolve([answer("old")]);
+  await cancelled;
+  assert.equal(h.children.length, 2);
+  assert.deepEqual(prompts(h.children[1]!), [["later message", "steer"]]);
+});
+
+test("oversized archives permit resume with new events only; other archive failures still reject", async t => {
+  const root = await mkdtemp(join(tmpdir(), "peeps-manager-archive-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "peeps"));
+  const file = join(root, "peeps", "child.jsonl");
+  await writeFile(file, "");
+  await truncate(file, MAX_ARCHIVE_BYTES + 1);
+  let failure: Error | undefined;
+  const h = setup({ persistent: true, readArchive: async () => {
+    if (failure) throw failure;
+    return readArchive(file, root);
+  } });
+  t.after(() => h.manager.close());
+  const run = h.manager.spawn({ task: "task" }, defaults, null);
+  await flush();
+  h.children[0]!.complete("old answer");
+  await flush();
+  await h.manager.closeChild(run.id);
+  await assert.rejects(h.manager.loadTranscript(run.id), /too large to display/);
+  await h.manager.send(run.id, "new task");
+  assert.equal(run.transcript.items.length, 0);
+  h.children[1]!.emit({ type: "agent_start" });
+  h.children[1]!.emit({ type: "agent_settled" });
+  await flush();
+  assert.equal(h.reports[1]!.status, "no-answer", "old answers must not be reused");
+  await h.manager.send(run.id, "answer now");
+  h.children[1]!.complete("new answer");
+  await flush();
+  assert.equal(h.reports[2]!.text, "new answer");
+  assert.ok(h.warnings.some(w => /history|archive/i.test(w)));
+  await h.manager.closeChild(run.id);
+  failure = new Error("archive is unreadable");
+  await assert.rejects(h.manager.send(run.id, "more"), failure);
+  assert.equal(h.children.length, 2, "other archive errors must prevent launch");
+});
+
+test("handled input on an idle child restarts auto-close without reporting", async t => {
+  const h = setup({ persistent: true, idleCloseMs: 100 });
+  t.after(() => h.manager.close());
+  const run = h.manager.spawn({ task: "task" }, defaults, null);
+  await flush();
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  h.children[0]!.complete("answer");
+  await flush();
+  t.mock.timers.tick(80);
+  h.children[0]!.handler = async () => ({ disposition: "handled" });
+  assert.deepEqual(await h.manager.send(run.id, "/command"), { disposition: "handled" });
+  t.mock.timers.tick(80);
+  assert.equal(run.status, "idle", "restart the full idle period");
+  t.mock.timers.tick(20);
+  await flush();
+  assert.equal(run.status, "closed");
+  assert.equal(h.children[0]!.closed, true);
+  assert.equal(h.reports.length, 1);
+});
+
+test("a cancelled resume finishing launch preparation cannot replace a later child", { timeout: 2000 }, async t => {
+  const prepared = deferred<void>();
+  const children: FakeChild[] = [];
+  const manager = new RunManager({
+    owner: "owner", readArchive: async () => [answer("old")], record: () => {}, report: () => {}, warn: () => {},
+    createChild: async () => {
+      const child = new FakeChild();
+      children.push(child);
+      if (children.length === 2) await prepared.promise;
+      return { connection: child, validateState: () => ({ thinking: "off", sessionFile: "/fake/child.jsonl", sessionId: "child" }) };
+    },
+  });
+  t.after(() => manager.close());
+  const run = manager.spawn({ task: "task" }, defaults, null);
+  await flush();
+  children[0]!.complete("old");
+  await flush();
+  await manager.closeChild(run.id);
+  const cancelled = assert.rejects(manager.send(run.id, "cancel me"), /closed|cancel/i);
+  await flush();
+  assert.equal(children.length, 2);
+  await manager.closeChild(run.id);
+  await manager.send(run.id, "later message");
+  prepared.resolve();
+  await cancelled;
+  await flush();
+  assert.equal(children[1]!.started, false, "cancelled preparation must never start a second session writer");
+  assert.equal(children[1]!.closed, true);
+  await manager.send(run.id, "keep going");
+  assert.deepEqual(prompts(children[2]!), [["later message", "steer"], ["keep going", "steer"]]);
 });
