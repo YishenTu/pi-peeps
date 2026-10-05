@@ -50,7 +50,7 @@ Subagents don't hold on to resources: one that sits idle for 10 minutes closes, 
 - **Shared files.** Subagents work in your directory and can edit the same files as the main agent. They aren't sandboxed, and closing one doesn't undo its edits.
 - **Stop.** Pressing Stop on the main agent doesn't stop subagents. Their answers wait until you send your next message.
 - **No approvals.** If a subagent asks for confirmation, the request is declined and that subagent stops.
-- **History.** For saved sessions, subagent sessions are kept in `<agentDir>/peeps/` and are not deleted automatically. Only the session that started a subagent can resume it.
+- **History.** For saved sessions, subagent sessions are kept in a folder beside the main session file, named after it (`<session>.jsonl` → `<session>/`). They don't appear in Pi's session picker and are not deleted automatically, even if you delete the main session. Only the session that started a subagent can resume it.
 - **Ephemeral sessions** (`--no-session`) keep no subagent history, so their subagents can't resume and never close for idleness.
 
 Some delivery edge cases come from Pi itself: [#5581](https://github.com/earendil-works/pi/issues/5581), [#9886](https://github.com/earendil-works/pi/issues/9886), [#10267](https://github.com/earendil-works/pi/issues/10267), [#6744](https://github.com/earendil-works/pi/issues/6744), [#9632](https://github.com/earendil-works/pi/issues/9632).

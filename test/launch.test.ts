@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -60,6 +59,10 @@ async function fixture(t: TestContext): Promise<Fixture> {
   return { root, agentDir, pkg, cwd };
 }
 
+function parentSessionFile(f: Fixture): string {
+  return join(f.agentDir, "sessions", "--project--", `2026-01-01T00-00-00-000Z_${OWNER}.jsonl`);
+}
+
 function contextFor(
   f: Fixture,
   overrides: Partial<LaunchContext> = {},
@@ -67,8 +70,7 @@ function contextFor(
 ): LaunchContext {
   return {
     cwd: f.cwd,
-    ownerId: OWNER,
-    persistent: true,
+    parentSessionFile: parentSessionFile(f),
     trusted: true,
     agentDir: f.agentDir,
     packageDir: f.pkg,
@@ -118,8 +120,8 @@ test("persistent launch isolates the session archive and clears inherited sessio
   assert.ok(!args.includes("--mode"));
   assert.ok(!args.includes("--no-session"));
 
-  const hash = createHash("sha256").update(OWNER, "utf8").digest("hex");
-  const runDir = join(resolve(f.agentDir), "peeps", hash, RUN_ID);
+  // Nested beside the parent file, where Pi's flat session picker never looks.
+  const runDir = join(resolve(f.agentDir), "sessions", "--project--", `2026-01-01T00-00-00-000Z_${OWNER}`, RUN_ID);
   assert.equal(spec.runDir, runDir);
   assert.ok(hasFlagValue(args, "--session-dir", runDir));
   const sessionId = valueAfter(args, "--session-id");
@@ -142,12 +144,12 @@ test("persistent launch isolates the session archive and clears inherited sessio
 
 test("ephemeral launch uses --no-session and creates no archive directory", async (t) => {
   const f = await fixture(t);
-  const spec = await buildLaunch(contextFor(f, { persistent: false }), runFor());
+  const spec = await buildLaunch(contextFor(f, { parentSessionFile: undefined }), runFor());
   assert.ok(spec.options.args.includes("--no-session"));
   assert.ok(!spec.options.args.includes("--session-dir"));
   assert.ok(!spec.options.args.includes("--session-id"));
   assert.equal(spec.runDir, undefined);
-  assert.ok(!existsSync(join(resolve(f.agentDir), "peeps")));
+  assert.ok(!existsSync(join(resolve(f.agentDir), "sessions")));
 });
 
 test("trust is preserved explicitly for the same cwd", async (t) => {
@@ -440,7 +442,7 @@ test("resume reopens the exact recorded session id in the same run directory, ne
   for (const flag of ["--continue", "-c", "--resume", "-r", "--fork", "--session"]) assert.ok(!args.includes(flag), flag);
   assert.ok(!args.some((arg) => arg.includes("SECRET TASK")));
   await assert.rejects(buildLaunch(contextFor(f), runFor(), { sessionId: "../escape" }), /unsafe session id/);
-  await assert.rejects(buildLaunch(contextFor(f, { persistent: false }), runFor(), { sessionId }), /ephemeral/);
+  await assert.rejects(buildLaunch(contextFor(f, { parentSessionFile: undefined }), runFor(), { sessionId }), /ephemeral/);
 });
 
 test("a resumed child must report exactly its recorded session, never a fresh one", async (t) => {

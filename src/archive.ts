@@ -9,12 +9,12 @@
  * - {@link readArchive} reads a finished child's session JSONL directly. It
  *   never uses `SessionManager.open` (which would migrate or open the file as
  *   live session state), only reads the file, verifies real-path containment
- *   under `<archiveRoot>/peeps`, and reconstructs the last entry's branch
- *   without letting compaction hide pre-compaction history.
+ *   in a subdirectory of the parent's session directory, and reconstructs
+ *   the last entry's branch without letting compaction hide pre-compaction history.
  */
 import { createReadStream } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
-import { join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import {
   parseSessionEntries,
   sessionEntryToContextMessages,
@@ -23,8 +23,17 @@ import {
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { DeliveryStatus, RunStatus, RunView } from "./contracts.ts";
 
-/** Subdirectory of the agent dir that holds peeps child session archives. */
-const ARCHIVE_DIR_NAME = "peeps";
+/**
+ * Directory holding a persistent parent's child sessions:
+ * `<sessionDir>/<parent>.jsonl` gets `<sessionDir>/<parent>/<runId>/`.
+ * Pi's session picker lists only top-level `*.jsonl`, so children stay hidden.
+ */
+export function childArchiveDir(parentSessionFile: string): string {
+  const file = resolve(parentSessionFile);
+  const name = basename(file);
+  if (!name.endsWith(".jsonl")) throw new Error(`unsupported parent session file: ${parentSessionFile}`);
+  return join(dirname(file), name.slice(0, -".jsonl".length));
+}
 /** Inspection ceiling, not a task/output limit. The full native file is retained. */
 export const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
 export class ArchiveTooLargeError extends Error {
@@ -302,15 +311,14 @@ function selectHistoryMessages(entries: readonly SafeEntry[]): AgentMessage[] {
   return messages;
 }
 
-async function resolveArchiveRoot(archiveRoot: string): Promise<string> {
-  if (typeof archiveRoot !== "string" || archiveRoot.length === 0) {
-    throw new Error("readArchive requires an archive root");
+async function resolveArchiveRoot(sessionDir: string): Promise<string> {
+  if (typeof sessionDir !== "string" || sessionDir.length === 0) {
+    throw new Error("readArchive requires the parent session directory");
   }
-  const peepsDir = join(resolve(archiveRoot), ARCHIVE_DIR_NAME);
   try {
-    return await realpath(peepsDir);
+    return await realpath(resolve(sessionDir));
   } catch {
-    throw new Error(`peeps archive directory is unavailable: ${peepsDir}`);
+    throw new Error(`parent session directory is unavailable: ${sessionDir}`);
   }
 }
 
@@ -321,7 +329,8 @@ async function resolveArchiveFile(sessionFile: string, allowedRoot: string): Pro
   } catch {
     throw new Error(`child session archive not found: ${sessionFile}`);
   }
-  if (!isWithin(allowedRoot, real)) {
+  // Top-level files are ordinary sessions, never child archives.
+  if (!isWithin(allowedRoot, real) || dirname(real) === allowedRoot) {
     throw new Error(`refusing to read a session archive outside ${allowedRoot}: ${sessionFile}`);
   }
   let info: Awaited<ReturnType<typeof stat>>;
@@ -341,18 +350,19 @@ async function resolveArchiveFile(sessionFile: string, allowedRoot: string): Pro
  * Read a finished child's session archive as a full historical message list.
  *
  * Strictly read-only: the file is parsed as-is (`parseSessionEntries`, no
- * migration), and the resolved path must stay under `<archiveRoot>/peeps`
- * after symlink resolution. A missing or out-of-root path throws a diagnostic
- * error rather than returning a partial result.
+ * migration), and the resolved path must stay in a subdirectory of the
+ * parent's session directory after symlink resolution. Forks share that
+ * directory, so inherited runs stay inspectable. A missing or out-of-root
+ * path throws a diagnostic error rather than returning a partial result.
  */
 export async function readArchive(
   sessionFile: string,
-  archiveRoot: string,
+  sessionDir: string,
 ): Promise<AgentMessage[]> {
   if (typeof sessionFile !== "string" || sessionFile.length === 0) {
     throw new Error("readArchive requires a session file path");
   }
-  const allowedRoot = await resolveArchiveRoot(archiveRoot);
+  const allowedRoot = await resolveArchiveRoot(sessionDir);
   const real = await resolveArchiveFile(sessionFile, allowedRoot);
   const chunks: Buffer[] = [];
   let bytes = 0;

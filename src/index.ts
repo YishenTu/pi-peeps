@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import { Type } from "typebox";
 import type { JsonValue } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
@@ -61,11 +62,12 @@ export default function peeps(pi: ExtensionAPI): void {
     let instance: Runtime;
     const alive = () => runtime === instance && ctx.sessionManager.getSessionId() === owner;
     const agentDir = getAgentDir();
+    const parentSessionFile = ctx.sessionManager.getSessionFile();
     const manager = new RunManager({
       owner,
       createChild: async (run, resume) => {
         const spec = await buildLaunch({
-          cwd: ctx.cwd, ownerId: owner, persistent: !!ctx.sessionManager.getSessionFile(),
+          cwd: ctx.cwd, ...(parentSessionFile ? { parentSessionFile } : {}),
           trusted: ctx.isProjectTrusted(), agentDir, packageDir: getPackageDir(),
           argv: process.argv, env: process.env, executable: process.execPath,
         }, run, resume);
@@ -75,7 +77,10 @@ export default function peeps(pi: ExtensionAPI): void {
         };
       },
       idleCloseMs: IDLE_CLOSE_MS,
-      readArchive: file => readArchive(file, agentDir),
+      readArchive: async file => {
+        if (!parentSessionFile) throw new Error("An ephemeral parent keeps no child archives.");
+        return readArchive(file, dirname(parentSessionFile));
+      },
       record: record => { if (alive()) pi.appendEntry("peeps/run", record); },
       report: (report, anchor) => { if (alive()) instance.delivery.offer(report, anchor); },
       warn: message => { if (alive() && ctx.mode === "tui") ctx.ui.notify(message, "warning"); },

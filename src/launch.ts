@@ -16,12 +16,13 @@
  * belong to the run manager. This module only validates the child's
  * `get_state` snapshot ({@link validateChildState}).
  */
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { chmod, mkdir } from "node:fs/promises";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
 import { parseArgs, type Args } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { childArchiveDir } from "./archive.ts";
 import type { RpcProcessOptions, RunView } from "./contracts.ts";
 
 /** Child-process marker. The extension factory must no-op while this is set. */
@@ -41,9 +42,6 @@ export const PEEPS_TOOL_NAMES: readonly string[] = [
   "peeps_inspect",
   "peeps_close",
 ];
-
-/** Subdirectory of the agent dir that holds peeps child session archives. */
-const ARCHIVE_DIR_NAME = "peeps";
 
 const PEEPS_TOOL_SET = new Set(PEEPS_TOOL_NAMES);
 
@@ -80,8 +78,8 @@ const NODE_EXECUTABLE = /^node(?:js)?(?:-\d+(?:\.\d+)*)?$/;
 
 export interface LaunchContext {
   cwd: string;
-  ownerId: string;
-  persistent: boolean;
+  /** The parent's session file; absent for an ephemeral parent. */
+  parentSessionFile?: string;
   trusted: boolean;
   agentDir: string;
   packageDir: string;
@@ -289,7 +287,7 @@ function assertWithinDir(root: string, candidate: string, label: string): void {
  * Build the child launch for one run.
  *
  * Persistent parents get a fresh native session id inside a private run
- * directory (`<agentDir>/peeps/<sha256(owner)>/<runId>`, mode 0700), or reopen
+ * directory nested beside the parent session file (see `childArchiveDir`), or reopen
  * the recorded one to resume. Ephemeral parents get `--no-session`. Messages
  * are never placed on argv.
  */
@@ -303,7 +301,6 @@ export async function buildLaunch(
 
   const cwd = requireString(context.cwd, "cwd");
   const agentDir = resolve(requireString(context.agentDir, "agentDir"));
-  const ownerId = requireString(context.ownerId, "ownerId");
   const runId = requireString(run.id, "run id");
   if (!SAFE_PATH_SEGMENT.test(runId)) {
     throw new Error(`unsafe run id for an archive directory: ${runId}`);
@@ -331,9 +328,8 @@ export async function buildLaunch(
 
   const args: string[] = ["--provider", run.model.provider, "--model", run.model.id, "--thinking", run.thinking];
   let runDir: string | undefined;
-  if (context.persistent) {
-    const ownerHash = createHash("sha256").update(ownerId, "utf8").digest("hex");
-    runDir = join(agentDir, ARCHIVE_DIR_NAME, ownerHash, runId);
+  if (context.parentSessionFile !== undefined) {
+    runDir = join(childArchiveDir(requireString(context.parentSessionFile, "parentSessionFile")), runId);
     await mkdir(runDir, { recursive: true, mode: 0o700 });
     await chmod(runDir, 0o700);
     // Exact ids only: never --continue/--resume pickers or --fork. Pi creates a new
