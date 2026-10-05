@@ -6,6 +6,14 @@
   "description": "Subagents for Pi: delegate to background Pi sessions, message them, and watch their threads live.",
   "license": "MIT",
   "author": "Yishen Tu",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YishenTu/pi-peeps.git"
+  },
+  "homepage": "https://github.com/YishenTu/pi-peeps#readme",
+  "bugs": {
+    "url": "https://github.com/YishenTu/pi-peeps/issues"
+  },
   "keywords": [
     "pi-package"
   ],

@@ -11,16 +11,14 @@ Your main agent hands tasks to background agents and keeps working. Each answer 
 
 ## Install
 
-Try it for one session:
-
 ```sh
-pi -e /absolute/path/to/peeps
+pi install git:github.com/YishenTu/pi-peeps
 ```
 
-Or install it:
+Or try it for one session without installing:
 
 ```sh
-pi install /absolute/path/to/peeps
+pi -e git:github.com/YishenTu/pi-peeps
 ```
 
 Works in Pi's terminal UI on macOS and Linux (Linux not yet tested). Windows and compiled Pi binaries aren't supported.
@@ -58,6 +56,8 @@ Subagents don't hold on to resources: one that sits idle for 10 minutes closes, 
 Some delivery edge cases come from Pi itself: [#5581](https://github.com/earendil-works/pi/issues/5581), [#9886](https://github.com/earendil-works/pi/issues/9886), [#10267](https://github.com/earendil-works/pi/issues/10267), [#6744](https://github.com/earendil-works/pi/issues/6744), [#9632](https://github.com/earendil-works/pi/issues/9632).
 
 ## Development
+
+Install your checkout with `pi install /absolute/path/to/pi-peeps`; Pi loads it in place, so `/reload` picks up code changes.
 
 ```sh
 npm ci --ignore-scripts
