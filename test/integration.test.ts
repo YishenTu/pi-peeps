@@ -26,7 +26,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
+import { dirname, join, sep } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { getPackageDir } from "@earendil-works/pi-coding-agent";
@@ -65,6 +65,10 @@ const CHILD_ARGV: string[] = [
   "--no-context-files",
 ];
 
+function parentSessionFile(agentDir: string): string {
+  return join(agentDir, "sessions", "--workspace--", `parent_${OWNER}.jsonl`);
+}
+
 function childLaunchContext(
   agentDir: string,
   workspace: string,
@@ -73,8 +77,7 @@ function childLaunchContext(
 ): LaunchContext {
   return {
     cwd: workspace,
-    ownerId: OWNER,
-    persistent,
+    ...(persistent ? { parentSessionFile: parentSessionFile(agentDir) } : {}),
     trusted: false,
     agentDir,
     packageDir: PACKAGE_DIR,
@@ -224,7 +227,7 @@ async function createHarness(root: string, spec: ScriptSpec): Promise<Harness> {
         validateState: (state) => validateChildState(state, run, launch.runDir, resume),
       };
     },
-    readArchive: (file) => readArchive(file, agentDir),
+    readArchive: (file) => readArchive(file, dirname(parentSessionFile(agentDir))),
     record: (record) => {
       records.push(record);
     },
@@ -368,10 +371,10 @@ test("RPC child has fresh context, steers natively, returns exact text, follows 
   assert.equal(typeof view.sessionFile, "string");
   const sessionFile = view.sessionFile as string;
   assert.ok(
-    sessionFile.startsWith(join(harness.agentDir, "peeps") + sep),
-    `session archive must live under the isolated agent dir: ${sessionFile}`,
+    sessionFile.startsWith(join(harness.agentDir, "sessions", "--workspace--", `parent_${OWNER}`) + sep),
+    `session archive must be nested under the parent session: ${sessionFile}`,
   );
-  const archived = await readArchive(sessionFile, harness.agentDir);
+  const archived = await readArchive(sessionFile, dirname(parentSessionFile(harness.agentDir)));
   const archivedAssistant = archived.filter((message) => roleOf(message) === "assistant").map(textOf);
   assert.ok(archivedAssistant.includes(spec.finalText), "archive must contain the exact final text");
   assert.ok(archived.some((message) => roleOf(message) === "user" && textOf(message) === task));
@@ -383,7 +386,7 @@ test("RPC child has fresh context, steers natively, returns exact text, follows 
       createChild: async () => {
         throw new Error("replay must not create children");
       },
-      readArchive: (file) => readArchive(file, harness.agentDir),
+      readArchive: (file) => readArchive(file, dirname(parentSessionFile(harness.agentDir))),
       record: () => {},
       report: () => {},
       warn: () => {},

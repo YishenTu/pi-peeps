@@ -234,7 +234,7 @@ test("inspect does not label an unavailable archived answer as final", async t =
   h.session.appendCustomEntry("peeps/run", { version: 1, owner, anchor: null, run: {
     id: ARCHIVED_ID, label: "archived", task: "archived task", status: "closed",
     model: { provider: "fake", id: "scripted" }, thinking: "off", createdAt: 1, finishedAt: 2,
-    activity: "Closed", reports: 1, delivery: "appended", sessionFile: join(agentDir, "peeps", "missing", "run", "child.jsonl"),
+    activity: "Closed", reports: 1, delivery: "appended", sessionFile: join(agentDir, "sessions", "--tmp--", "missing", "run", "child.jsonl"),
   } });
   await h.emit("session_start");
   const status = await h.call("peeps_inspect", { id: ARCHIVED_ID });

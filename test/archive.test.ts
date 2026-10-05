@@ -4,14 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import { readArchive, readRunRecords, RUN_RECORD_TYPE, MAX_ARCHIVE_BYTES } from "../src/archive.ts";
+import { childArchiveDir, readArchive, readRunRecords, RUN_RECORD_TYPE, MAX_ARCHIVE_BYTES } from "../src/archive.ts";
 
 test("oversized archives fail read-only inspection clearly without reading or changing the whole file", async t => {
   const fixture = await makeArchive(t);
   const file = join(fixture.archiveRoot, "large.jsonl");
   await writeFile(file, "");
   await truncate(file, MAX_ARCHIVE_BYTES + 1); // Sparse fixture: no large allocation.
-  await assert.rejects(readArchive(file, fixture.agentDir), /too large to display.*64 MiB/);
+  await assert.rejects(readArchive(file, fixture.sessionDir), /too large to display.*64 MiB/);
   assert.equal((await stat(file)).size, MAX_ARCHIVE_BYTES + 1);
 });
 
@@ -20,17 +20,18 @@ const RUN_B = "22222222-2222-4222-8222-222222222222";
 
 interface Archive {
   root: string;
-  agentDir: string;
+  /** The parent's session directory, the read containment root. */
+  sessionDir: string;
   archiveRoot: string;
 }
 
 async function makeArchive(t: TestContext): Promise<Archive> {
   const root = await mkdtemp(join(tmpdir(), "peeps-archive-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const agentDir = join(root, "agent");
-  const archiveRoot = join(agentDir, "peeps", "hash", "run");
+  const sessionDir = join(root, "agent", "sessions", "--project--");
+  const archiveRoot = join(childArchiveDir(join(sessionDir, "parent.jsonl")), "run");
   await mkdir(archiveRoot, { recursive: true, mode: 0o700 });
-  return { root, agentDir, archiveRoot };
+  return { root, sessionDir, archiveRoot };
 }
 
 async function writeArchive(
@@ -112,7 +113,7 @@ test("readArchive restores pre-compaction history on the last entry's branch", a
     userMessage("aaaaaaa4", "aaaaaaa3", "after"),
   ]);
 
-  const messages = await readArchive(file, a.agentDir);
+  const messages = await readArchive(file, a.sessionDir);
   assert.deepEqual(
     messages.map((message) => message.role),
     ["user", "assistant", "user"],
@@ -132,7 +133,7 @@ test("readArchive follows the branch containing the last entry", async (t) => {
     userMessage("aaaaaaa3", "aaaaaaa1", "c"),
   ]);
 
-  const messages = await readArchive(file, a.agentDir);
+  const messages = await readArchive(file, a.sessionDir);
   assert.deepEqual(
     messages.map((message) => (message as { content: unknown }).content),
     ["a", "c"],
@@ -147,7 +148,7 @@ test("readArchive reads legacy linear sessions without migrating them", async (t
     userMessage(undefined, null, "two"),
   ]);
 
-  const messages = await readArchive(file, a.agentDir);
+  const messages = await readArchive(file, a.sessionDir);
   assert.deepEqual(
     messages.map((message) => (message as { content: unknown }).content),
     ["one", "two"],
@@ -178,7 +179,7 @@ test("readArchive converts custom messages and tolerates corrupt records", async
     { type: "message", id: "ccccccc1", parentId: "aaaaaaa1" },
   ]);
 
-  const messages = await readArchive(file, a.agentDir);
+  const messages = await readArchive(file, a.sessionDir);
   assert.deepEqual(
     messages.map((message) => message.role),
     ["user", "custom"],
@@ -186,22 +187,32 @@ test("readArchive converts custom messages and tolerates corrupt records", async
   assert.equal((messages[1] as { content: unknown }).content, "injected context");
 });
 
+test("child archives nest in a directory named after the parent session file", () => {
+  assert.equal(childArchiveDir("/s/--p--/2026_abc.jsonl"), "/s/--p--/2026_abc");
+  assert.throws(() => childArchiveDir("/s/--p--/parent"), /unsupported parent session file/);
+});
+
 test("readArchive rejects out-of-root, symlinked, and missing files", async (t) => {
   const a = await makeArchive(t);
   const outside = join(a.root, "outside.jsonl");
   await writeFile(outside, JSON.stringify(header()) + "\n", "utf8");
 
-  await assert.rejects(readArchive(outside, a.agentDir), /refusing to read/);
-  await assert.rejects(readArchive(join(a.archiveRoot, "missing.jsonl"), a.agentDir), /not found/);
-  await assert.rejects(readArchive(a.archiveRoot, a.agentDir), /not a file/);
+  await assert.rejects(readArchive(outside, a.sessionDir), /refusing to read/);
+  await assert.rejects(readArchive(join(a.archiveRoot, "missing.jsonl"), a.sessionDir), /not found/);
+  await assert.rejects(readArchive(a.archiveRoot, a.sessionDir), /not a file/);
 
   const link = join(a.archiveRoot, "link.jsonl");
   await symlink(outside, link);
-  await assert.rejects(readArchive(link, a.agentDir), /refusing to read/);
+  await assert.rejects(readArchive(link, a.sessionDir), /refusing to read/);
+
+  // A top-level file is an ordinary session, never a child archive.
+  const topLevel = join(a.sessionDir, "other.jsonl");
+  await writeFile(topLevel, JSON.stringify(header()) + "\n", "utf8");
+  await assert.rejects(readArchive(topLevel, a.sessionDir), /refusing to read/);
 
   await assert.rejects(
-    readArchive(outside, join(a.root, "no-agent")),
-    /archive directory is unavailable/,
+    readArchive(outside, join(a.root, "no-sessions")),
+    /session directory is unavailable/,
   );
 });
 
