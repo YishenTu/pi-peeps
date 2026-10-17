@@ -233,6 +233,11 @@ function delay(ms: number): Promise<void> {
 
 export default function scriptedProviderExtension(pi: ExtensionAPI): void {
   const dir = testDir();
+  pi.registerCommand("peeps-test-command", {
+    description: "Must never execute when sent as parent message content.",
+    async handler() { if (dir) writeFileSync(join(dir, "command-executed"), "unexpected"); },
+  });
+  pi.on("input", () => { if (dir) writeFileSync(join(dir, "human-input"), "unexpected"); });
   if (dir) {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "child.pid"), String(process.pid));
@@ -263,6 +268,7 @@ export default function scriptedProviderExtension(pi: ExtensionAPI): void {
     label: "Scripted gate",
     description:
       "Test-only blocking tool. Waits, bounded, until the release file exists, then returns.",
+    promptGuidelines: ["PEEPS_TEST_TOOL_GUIDANCE"],
     parameters: Type.Object({ tag: Type.String() }),
     async execute(_id, params, signal, _update, _ctx) {
       const directory = testDir();

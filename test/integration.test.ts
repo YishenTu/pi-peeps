@@ -42,6 +42,7 @@ import { RpcProcess } from "../src/rpc-process.ts";
 import { RunManager, type ManagerOptions } from "../src/run-manager.ts";
 import type { ModelChoice, RunView } from "../src/contracts.ts";
 import { RESULT_TYPE } from "../src/delivery.ts";
+import { PARENT_MESSAGE_TYPE, RECEIVE_COMMAND } from "../src/parent-message.ts";
 import { GATE_TOOL_NAME, SCRIPTED_MODEL, SCRIPTED_PROVIDER } from "./fixtures/scripted-provider.ts";
 
 const FIXTURE_EXTENSION = fileURLToPath(new URL("./fixtures/scripted-provider.ts", import.meta.url));
@@ -69,6 +70,8 @@ const CHILD_ARGV: string[] = [
   "--no-skills",
   "--no-prompt-templates",
   "--no-context-files",
+  "--append-system-prompt",
+  "PEEPS_TEST_APPEND_GUIDANCE",
 ];
 
 function parentSessionFile(agentDir: string): string {
@@ -207,7 +210,7 @@ interface Harness {
   close(): Promise<void>;
 }
 
-async function createHarness(root: string, spec: ScriptSpec): Promise<Harness> {
+async function createHarness(root: string, spec: ScriptSpec, projectInstructions = false): Promise<Harness> {
   const agentDir = join(root, "agent");
   const workspace = join(root, "workspace");
   const testDir = join(root, "script");
@@ -217,6 +220,7 @@ async function createHarness(root: string, spec: ScriptSpec): Promise<Harness> {
     mkdir(testDir, { recursive: true }),
   ]);
   await writeAgentSettings(agentDir);
+  if (projectInstructions) await writeFile(join(workspace, "AGENTS.md"), "PEEPS_TEST_PROJECT_GUIDANCE\n");
 
   const env = childEnv(testDir, spec);
   const records: RunRecord[] = [];
@@ -227,7 +231,12 @@ async function createHarness(root: string, spec: ScriptSpec): Promise<Harness> {
   const options: ManagerOptions = {
     owner: OWNER,
     createChild: async (run, resume) => {
-      const launch = await buildLaunch(childLaunchContext(agentDir, workspace, env, true), run, resume);
+      const context = childLaunchContext(agentDir, workspace, env, true);
+      if (projectInstructions) {
+        context.argv = context.argv.filter(arg => arg !== "--no-context-files");
+        context.trusted = true;
+      }
+      const launch = await buildLaunch(context, run, resume);
       return {
         connection: new RpcProcess(launch.options),
         validateState: (state) => validateChildState(state, run, launch.runDir, resume),
@@ -295,14 +304,16 @@ test("RPC child has fresh context, steers natively, returns exact text, follows 
     steerToken: `STEER-${nonce}`,
     gateTag: `gate-${nonce}`,
   };
-  const harness = await createHarness(root, spec);
+  const harness = await createHarness(root, spec, true);
   t.after(async () => {
     await harness.close();
     await rm(root, { recursive: true, force: true });
   });
 
-  const task = `TASK-${nonce}: wait at the gate, then report.`;
+  const task = `/peeps-test-command TASK-${nonce}: wait at the gate, then report.\n  Preserve whitespace 中  `;
   const run = harness.manager.spawn({ task }, { model: MODEL, thinking: "off" }, null);
+  const early = [`EARLY-${nonce}: one`, `EARLY-${nonce}: two`];
+  const startupMessages = Promise.all(early.map(message => harness.manager.send(run.id, message)));
 
   // The gate tool starts inside a real agent turn, so steering is a native
   // mid-run steer rather than a queued follow-up.
@@ -311,9 +322,10 @@ test("RPC child has fresh context, steers natively, returns exact text, follows 
     "scripted gate tool never started",
   );
   assert.equal(harness.manager.get(run.id)?.status, "working");
+  await startupMessages;
 
   const admission = (await harness.manager.send(run.id, spec.steerToken)) as { disposition?: string };
-  assert.equal(admission.disposition, "queued", "a message to a working child must queue as native steering");
+  assert.equal(admission.disposition, "submitted", "custom steering submission is not model consumption");
 
   // Release only after admission so the steer is guaranteed to reach the next model request.
   await writeFile(join(harness.testDir, "release"), "go");
@@ -355,6 +367,9 @@ test("RPC child has fresh context, steers natively, returns exact text, follows 
   assert.equal(first.model.provider, SCRIPTED_PROVIDER);
   assert.equal(first.model.id, SCRIPTED_MODEL);
   assert.ok(!first.systemPrompt.includes(task), "task must not be duplicated into the child system prompt");
+  for (const guidance of ["PEEPS_TEST_PROJECT_GUIDANCE", "PEEPS_TEST_APPEND_GUIDANCE", "PEEPS_TEST_TOOL_GUIDANCE"]) {
+    assert.ok(first.systemPrompt.includes(guidance), `first custom-triggered request lost ${guidance}`);
+  }
 
   // Regression guard: the Peeps extension is loaded but must no-op in the child.
   assert.ok(first.tools.includes(GATE_TOOL_NAME), `expected ${GATE_TOOL_NAME} in ${first.tools.join(",")}`);
@@ -383,7 +398,16 @@ test("RPC child has fresh context, steers natively, returns exact text, follows 
   const archived = await readArchive(sessionFile, dirname(parentSessionFile(harness.agentDir)));
   const archivedAssistant = archived.filter((message) => roleOf(message) === "assistant").map(textOf);
   assert.ok(archivedAssistant.includes(spec.finalText), "archive must contain the exact final text");
-  assert.ok(archived.some((message) => roleOf(message) === "user" && textOf(message) === task));
+  for (const text of [task, ...early, spec.steerToken, followUp]) {
+    const matches = archived.filter(message => textOf(message) === text);
+    assert.equal(matches.length, 1, "each parent message is archived once");
+    assert.equal(matches[0]?.role, "custom");
+    assert.equal((matches[0] as { customType?: string }).customType, PARENT_MESSAGE_TYPE);
+  }
+  assert.ok(!archived.some(message => roleOf(message) === "user"), "no fabricated human prompts in the child");
+  assert.deepEqual(archived.filter(message => message.role === "custom").map(textOf), [task, ...early, spec.steerToken, followUp]);
+  assert.ok(!existsSync(join(harness.testDir, "command-executed")), "parent text must not execute a child command");
+  assert.ok(!existsSync(join(harness.testDir, "human-input")), "parent messages bypass the human-input path");
 
   // The same read-back through RunManager history resolution.
   const replay = new RunManager(
@@ -475,8 +499,11 @@ test(`interrupt keeps a real child; after close and reload it resumes its own se
   const firstPid = Number(await readFile(join(harness.testDir, "child.pid"), "utf8"));
 
   // Interrupt: the work stops, the child and its process stay, and nothing is reported.
+  const queued = "  /literal-command\nqueued parent message 中  ";
+  await harness.manager.send(run.id, queued);
   const interrupted = await harness.manager.interrupt(run.id);
   assert.equal(interrupted.interrupted, true);
+  assert.deepEqual(interrupted.discarded, [queued], "interrupt returns custom messages omitted by Pi clear_queue");
   await waitFor(() => harness.manager.get(run.id)?.status === "idle", "interrupted child never went idle");
   assert.equal(harness.outcomes.size, 0, `interrupt is not news; warnings: ${harness.warnings.join(" | ")}`);
   assert.ok(processAlive(firstPid));
@@ -518,6 +545,7 @@ test(`interrupt keeps a real child; after close and reload it resumes its own se
   assert.ok(last.some((message) => message.text === first));
   assert.ok(last.some((message) => message.role === "assistant" && message.text === `REPLY ${first}`));
   assert.equal(last.at(-1)?.text, second);
+  assert.ok(!requests.some(record => record.messages.some(message => message.text === queued)), "discarded messages never reappear after resume");
   assert.ok(!requests.some((record) => nonSystemMessages(record).filter((m) => m.text === task).length > 1), "the task is never re-sent");
 
   await reloaded.close();
@@ -581,10 +609,12 @@ test("child guard suppresses the nested Peeps extension while the control proves
   const guarded = await queryChildCommands(root, true);
   assert.equal(guarded.model, `${SCRIPTED_PROVIDER}/${SCRIPTED_MODEL}`);
   assert.ok(!guarded.commands.includes("peeps"), `guarded child exposed Peeps commands: ${guarded.commands.join(",")}`);
+  assert.ok(guarded.commands.includes(RECEIVE_COMMAND), "only the child receiver is enabled");
 
   const control = await queryChildCommands(root, false);
   assert.equal(control.model, `${SCRIPTED_PROVIDER}/${SCRIPTED_MODEL}`);
   assert.ok(control.commands.includes("peeps"), `control child did not load the Peeps extension; commands: ${control.commands.join(",")}`);
+  assert.ok(!control.commands.includes(RECEIVE_COMMAND), "the receiver is child-only");
 });
 
 type RpcRecord = Record<string, any>;

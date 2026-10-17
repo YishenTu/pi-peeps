@@ -167,7 +167,7 @@ export default function peeps(pi: ExtensionAPI): void {
   });
   pi.registerTool({
     name: "peeps_send", label: "Message peep", outputSchema: output,
-    description: "Send a message to a child, like typing into its Pi session. A working child is steered; an idle one starts working again with its conversation intact; a closed one is resumed first. Returns once Pi admits the message; any resulting answer arrives automatically as another Peeps notice.",
+    description: "Send a literal message from the parent to a child, shown separately from human prompts. A working child is steered; an idle one starts working again with its conversation intact; a closed one is resumed first. Slash commands and prompt templates are not executed or expanded. Returns submission status, not proof of model consumption; any resulting answer arrives automatically as another Peeps notice.",
     parameters: Type.Object({ id: Type.String(), message: Type.String({ minLength: 1 }) }),
     async execute(_id, params, signal, _update, ctx) {
       signal?.throwIfAborted();

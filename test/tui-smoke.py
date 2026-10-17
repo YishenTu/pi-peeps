@@ -34,6 +34,7 @@ try:
     read_until("enter open")
     os.write(master,b"\r")
     read_until("UI-CHILD-FINAL")
+    assert b"Message from parent" in re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", output), "parent message label missing from viewer"
     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH",60,140,0,0))
     proc.send_signal(signal.SIGWINCH)
     read_until("following")

@@ -8,6 +8,7 @@ import { openViewer } from "../src/ui/open.ts";
 import { createNativeItemFactory } from "../src/ui/native.ts";
 import { closeAllViewers } from "../src/ui/viewer.ts";
 import type { RunView, ViewSource } from "../src/contracts.ts";
+import { PARENT_MESSAGE_TYPE } from "../src/parent-message.ts";
 
 initTheme("dark", false); // Built-in theme, no filesystem watcher or personal config.
 const theme = { fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text,
@@ -32,6 +33,19 @@ function terminal() {
 }
 const keys = new KeybindingsManager({
   ...TUI_KEYBINDINGS, "app.tools.expand": { defaultKeys: "ctrl+o" }, "app.thinking.toggle": { defaultKeys: "ctrl+t" },
+});
+
+test("parent messages have a distinct native custom-message label without changing stored content", () => {
+  const { tui } = terminal();
+  const message = { role: "custom" as const, customType: PARENT_MESSAGE_TYPE,
+    content: "/literal command\nParent instruction", display: true, timestamp: 1 };
+  const factory = createNativeItemFactory({ tui, theme, cwd: "/tmp" });
+  const item = factory.create({ kind: "message", id: "parent", version: 1, message, streaming: false });
+  const rendered = item.render(80).join("\n");
+  assert.match(rendered, /Message from parent/);
+  assert.match(rendered, /Parent instruction/);
+  assert.equal(message.customType, PARENT_MESSAGE_TYPE);
+  assert.equal(message.content, "/literal command\nParent instruction");
 });
 
 test("overview caps child rows with an overflow line, shows working children before idle ones, and disposes its subscription", () => {

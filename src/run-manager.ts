@@ -6,6 +6,7 @@ import type { ChildConnection, DeliveryStatus, ModelChoice, Report, ReportStatus
 import { isTerminal } from "./contracts.ts";
 import { ArchiveTooLargeError, type RunRecord } from "./archive.ts";
 import { Transcript } from "./transcript.ts";
+import { RECEIVE_COMMAND, parentMessageCommand, parentMessageId } from "./parent-message.ts";
 
 export interface PreparedChild {
   connection: ChildConnection;
@@ -35,11 +36,15 @@ interface Run {
   /** The parent interrupted this work; its stop is not news. */
   interrupting: boolean;
   child?: ChildConnection;
-  /** Resolves once the task prompt is admitted (or the child ends), so messages queue behind it. */
+  /** Resolves once the task is submitted (or the child ends), so messages queue behind it. */
   ready: Promise<void>;
   markReady: () => void;
-  /** Prompt requests awaiting their admission response. */
+  /** Message submissions awaiting receiver dispatch and state checks. */
   pending: number;
+  /** Custom messages submitted but not yet observed in the native transcript. */
+  unappended: Map<string, string>;
+  /** Serialize submission and interrupt, without blocking mandatory close. */
+  inputTail: Promise<void>;
   /** No agent run is in progress since the last agent_settled. */
   settled: boolean;
   revision: number;
@@ -63,7 +68,7 @@ const disposition = (result: unknown): string | undefined =>
  * Owns children independently of tools and UI. No host session mutation occurs here.
  *
  * A child is a temporary Pi session for its parent runtime. Messages are native
- * prompts; whenever the child goes quiet its answer (or why there is none) is
+ * custom messages; whenever the child goes quiet its answer (or why there is none) is
  * reported once, and it idles until the next message, an explicit close, or
  * parent teardown.
  */
@@ -86,7 +91,7 @@ export class RunManager implements ViewSource {
       if (view.delivery === "held") view.delivery = "suppressed"; // Historical reports are never replayed.
       this.runs.set(view.id, { view, anchor: record.anchor, owner: record.owner, interrupting: false,
         ready: Promise.resolve(), markReady: () => {},
-        pending: 0, settled: true, revision: 0, checking: false, historical: true, transcriptLoaded: false,
+        pending: 0, unappended: new Map(), inputTail: Promise.resolve(), settled: true, revision: 0, checking: false, historical: true, transcriptLoaded: false,
         readers: 0, reportStart: 0, closeVersion: 0 });
     }
   }
@@ -126,7 +131,7 @@ export class RunManager implements ViewSource {
     let markReady!: () => void;
     const ready = new Promise<void>(resolve => { markReady = resolve; });
     const run: Run = { view, anchor, owner: this.options.owner, interrupting: false, ready, markReady,
-      pending: 0, settled: false, revision: 0, checking: false,
+      pending: 0, unappended: new Map(), inputTail: Promise.resolve(), settled: false, revision: 0, checking: false,
       historical: false, transcriptLoaded: true, readers: 0, reportStart: 0, closeVersion: 0 };
     this.runs.set(view.id, run);
     this.changed(run, true);
@@ -159,14 +164,15 @@ export class RunManager implements ViewSource {
     run.view.thinking = validated.thinking;
     run.view.startedAt = Date.now();
     this.changed(run, true);
-    if (resume) return; // The message that woke it is the first prompt.
-    const result = await this.prompt(run, run.view.task);
+    const commands = await run.child.request({ type: "get_commands" }) as { commands?: { name: string; source: string }[] };
+    if (cancelled()) return;
+    if (!commands.commands?.some(command => command.name === RECEIVE_COMMAND && command.source === "extension")) {
+      throw new Error("Peeps child receiver is unavailable; no parent message was sent.");
+    }
+    if (resume) return; // The message that woke it is the first message.
+    await this.submit(run, run.view.task);
     if (cancelled()) return;
     run.markReady();
-    if (disposition(result) === "handled" && run.view.status === "starting") {
-      // A consumed task starts no agent run, so the parent would otherwise wait forever.
-      this.settle(run, "no-answer", "The task was consumed by a child command or input extension; no agent run started.");
-    }
   }
   private event(run: Run, event: RpcIncoming): void {
     if (this.stopped || isTerminal(run.view.status)) return;
@@ -178,11 +184,19 @@ export class RunManager implements ViewSource {
       return;
     }
     if (event.type === "extension_error") {
+      if (event.event === "send_message" || event.extensionPath === `command:${RECEIVE_COMMAND}`) {
+        void this.finish(run, "failed", `Parent message delivery failed: ${event.error}`);
+        return;
+      }
       run.view.activity = `Extension error: ${event.event}`;
       this.changed(run);
       return;
     }
     run.view.transcript.apply(event as JsonAgentSessionEvent);
+    if (event.type === "message_start" || event.type === "message_end") {
+      const id = parentMessageId(event.message);
+      if (id) run.unappended.delete(id);
+    }
     run.revision++;
     let persist = false;
     if (event.type === "agent_start") {
@@ -208,20 +222,52 @@ export class RunManager implements ViewSource {
     }
     this.changed(run, persist);
   }
-  private async prompt(run: Run, message: string): Promise<unknown> {
+  private async submit(run: Run, message: string): Promise<unknown> {
+    const child = run.child;
+    const closeVersion = run.closeVersion;
     run.pending++;
     try {
-      return await run.child!.request({ type: "prompt", message, streamingBehavior: "steer" });
+      return await this.input(run, async () => {
+        run.interrupting = false;
+        const id = randomUUID();
+        run.unappended.set(id, message);
+        const result = await run.child!.request({ type: "prompt",
+          message: parentMessageCommand({ id, text: message }), streamingBehavior: "steer" });
+        if (isTerminal(run.view.status)) throw new Error("Peep closed during message submission.");
+        if (disposition(result) !== "handled") throw new Error("Peeps child receiver did not handle the message.");
+        const state = await run.child!.request({ type: "get_state" }) as RpcSessionState;
+        if (isTerminal(run.view.status)) throw new Error("Peep closed during message submission.");
+        if (run.unappended.has(id) && !state.isStreaming && !state.isCompacting) {
+          throw new Error("Child is idle with an unconfirmed parent message.");
+        }
+        // Dispatch and transcript append are not acknowledgements of model consumption.
+        return { disposition: "submitted", messageId: id };
+      });
     } catch (error) {
-      await this.finish(run, "failed", `Message admission failed or uncertain: ${String(error)}`);
+      if (run.child === child && run.closeVersion === closeVersion) {
+        await this.finish(run, "failed", `Message submission failed or uncertain: ${String(error)}`);
+      }
       throw error;
     } finally {
-      run.pending--;
-      void this.reconcile(run);
+      if (run.child === child && run.closeVersion === closeVersion) {
+        run.pending--;
+        void this.reconcile(run);
+      }
     }
   }
+  private input<T>(run: Run, action: () => Promise<T>): Promise<T> {
+    const closeVersion = run.closeVersion;
+    const operation = run.inputTail.then(() => {
+      if (this.stopped || closeVersion !== run.closeVersion || isTerminal(run.view.status)) {
+        throw new Error("Peep closed before input could be submitted.");
+      }
+      return action();
+    });
+    run.inputTail = operation.then(() => {}, () => {});
+    return operation;
+  }
   /**
-   * Send a message like a person typing into the child. Pi starts a run when the
+   * Send a custom parent message. Pi starts a run when the
    * child is idle and steers the current run when it is working; checking its
    * state first would race with that decision. A closed child resumes first.
    */
@@ -231,23 +277,13 @@ export class RunManager implements ViewSource {
     if (this.stopped) throw new Error("Peeps owner is closed.");
     const closeVersion = run.closeVersion;
     if (isTerminal(run.view.status)) await this.revive(run);
-    await run.ready; // Queue behind the task prompt while the child starts.
-    if (closeVersion !== run.closeVersion) throw new Error("Peep was closed before the message was admitted.");
+    await run.ready; // Queue behind the task while the child starts.
+    if (closeVersion !== run.closeVersion) throw new Error("Peep was closed before the message was submitted.");
     if (this.stopped || isTerminal(run.view.status)) {
       throw new Error(`Cannot message a ${run.view.status} peep${run.view.error ? `: ${run.view.error}` : "."}`);
     }
     this.clearIdleTimer(run);
-    const result = await this.prompt(run, message);
-    if (disposition(result) === "handled") {
-      if (run.view.status === "starting") {
-        // A resumed child consumed its waking message: it is simply idle again.
-        run.view.status = "idle";
-        run.view.activity = "Idle";
-        this.changed(run, true);
-      }
-      if (run.view.status === "idle") this.armIdleClose(run);
-    }
-    return result;
+    return this.submit(run, message);
   }
   /**
    * Reopen a closed or failed child's own session in a new process. Only its
@@ -266,6 +302,7 @@ export class RunManager implements ViewSource {
       if (!sessionFile || !sessionId) throw new Error("This peep cannot resume: its parent session is ephemeral, so no child history was kept.");
       if (run.owner !== this.options.owner) throw new Error("This peep belongs to another parent session and cannot resume here.");
       await run.releasing;
+      await run.inputTail;
       checkOpen();
       const transcript = new Transcript();
       try {
@@ -279,7 +316,7 @@ export class RunManager implements ViewSource {
       let markReady!: () => void;
       run.ready = new Promise<void>(resolve => { markReady = resolve; });
       Object.assign(run, { markReady, historical: false, transcriptLoaded: true, child: undefined, releasing: undefined,
-        pending: 0, settled: false, checking: false, interrupting: false, reportStart: transcript.items.length,
+        pending: 0, unappended: new Map(), settled: false, checking: false, interrupting: false, reportStart: transcript.items.length,
         reported: transcript.lastAssistant() });
       Object.assign(run.view, { transcript, status: "starting", activity: "Resuming", error: undefined,
         finishedAt: undefined, delivery: "none" });
@@ -302,18 +339,31 @@ export class RunManager implements ViewSource {
     const run = this.require(id);
     // Only a running agent can be aborted; aborting before Pi starts the run could strand it.
     if (this.stopped || run.view.status !== "working") return { interrupted: false, discarded: [] };
-    run.interrupting = true;
-    let cleared: { steering?: string[]; followUp?: string[] } | undefined;
-    try {
-      cleared = await run.child!.request({ type: "clear_queue" }) as typeof cleared;
-      await run.child!.request({ type: "abort" });
-    } catch (error) {
-      run.interrupting = false;
-      throw error;
-    }
-    // The run may have finished while the abort was in flight; that report stands.
-    if ((run.view.status as RunStatus) === "idle") run.interrupting = false;
-    return { interrupted: true, discarded: [...cleared?.steering ?? [], ...cleared?.followUp ?? []] };
+    return this.input(run, async () => {
+      if (run.view.status !== "working") return { interrupted: false, discarded: [] };
+      run.interrupting = true;
+      run.pending++;
+      let cleared: { steering?: string[]; followUp?: string[] } | undefined;
+      const discarded: string[] = [];
+      try {
+        cleared = await run.child!.request({ type: "clear_queue" }) as typeof cleared;
+        await run.child!.request({ type: "abort" });
+        // Pi clears custom steering too, but omits it from the returned text arrays.
+        // A message dequeued before clear_queue can still appear while abort settles.
+        // Only the submissions still unobserved after abort were discarded.
+        discarded.push(...run.unappended.values());
+        run.unappended.clear();
+      } catch (error) {
+        run.interrupting = false;
+        throw error;
+      } finally {
+        run.pending--;
+        void this.reconcile(run);
+      }
+      // The run may have finished while the abort was in flight; that report stands.
+      if ((run.view.status as RunStatus) === "idle") run.interrupting = false;
+      return { interrupted: true, discarded: [...discarded, ...cleared?.steering ?? [], ...cleared?.followUp ?? []] };
+    });
   }
   private armIdleClose(run: Run): void {
     this.clearIdleTimer(run);
@@ -335,7 +385,7 @@ export class RunManager implements ViewSource {
       const state = await run.child!.request({ type: "get_state" }) as RpcSessionState;
       if (run.view.status !== "working" || this.stopped || run.pending || revision !== run.revision || !run.settled) return;
       if (state.isStreaming || state.isCompacting) return;
-      if (state.pendingMessageCount) {
+      if (state.pendingMessageCount || run.unappended.size) {
         await this.finish(run, "failed", "Child settled with undelivered input; message delivery is uncertain.");
         return;
       }
@@ -379,6 +429,7 @@ export class RunManager implements ViewSource {
     this.clearIdleTimer(run);
     const resumable = !!run.view.sessionFile && !!run.view.sessionId && run.owner === this.options.owner;
     run.view.status = status;
+    run.unappended.clear();
     run.view.error = error;
     run.view.activity = error ?? (status === "failed" ? "Failed" : resumable ? "Closed · resumes on message" : "Closed");
     run.view.finishedAt = Date.now();

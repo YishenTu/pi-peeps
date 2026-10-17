@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { RunView } from "../src/contracts.ts";
@@ -192,7 +193,9 @@ test("resource allowlist is reproduced and relative paths resolve against cwd", 
   assert.ok(args.includes("--no-extensions"));
   assert.ok(hasFlagValue(args, "--extension", resolve(f.cwd, "ext.ts")));
   // Repeated --extension keeps every value and builtins stay verbatim.
-  assert.ok(args.filter((arg) => arg === "--extension").length === 2);
+  assert.equal(args.filter((arg) => arg === "--extension").length, 3);
+  assert.ok(args.some((arg, index) => arg === "--extension"
+    && args[index + 1] === fileURLToPath(new URL("../src/child-receiver.ts", import.meta.url))));
   assert.ok(args.includes("builtin:mcp"));
   assert.ok(args.includes("--no-skills"));
   assert.ok(hasFlagValue(args, "--skill", resolve(f.cwd, "skills/a.md")));

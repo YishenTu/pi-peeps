@@ -17,6 +17,7 @@
  * `get_state` snapshot ({@link validateChildState}).
  */
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { chmod, mkdir } from "node:fs/promises";
 import { basename, isAbsolute, join, resolve, sep } from "node:path";
@@ -25,7 +26,7 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { childArchiveDir } from "./archive.ts";
 import type { RpcProcessOptions, RunView } from "./contracts.ts";
 
-/** Child-process marker. The extension factory must no-op while this is set. */
+/** Child-process marker. The main extension must not register tools in a child. */
 export const PEEPS_CHILD_ENV = "PI_PEEPS_CHILD";
 
 /**
@@ -346,6 +347,7 @@ export async function buildLaunch(
   args.push(context.trusted ? "--approve" : "--no-approve");
 
   appendResourceArgs(args, parentArgs, cwd);
+  args.push("--extension", fileURLToPath(new URL("./child-receiver.ts", import.meta.url)));
   appendToolArgs(args, parentArgs);
 
   const options: RpcProcessOptions = {
