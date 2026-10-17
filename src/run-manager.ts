@@ -184,10 +184,15 @@ export class RunManager implements ViewSource {
       return;
     }
     if (event.type === "extension_error") {
-      if (event.event === "send_message" || event.extensionPath === `command:${RECEIVE_COMMAND}`) {
+      if (event.extensionPath === `command:${RECEIVE_COMMAND}` && run.unappended.size) {
         void this.finish(run, "failed", `Parent message delivery failed: ${event.error}`);
         return;
       }
+      // Pi labels every extension's sendMessage failure as <runtime>/send_message,
+      // including errors after an admitted run starts. It carries no message id.
+      // Check for an idle child with undelivered input: startup failures can
+      // return Pi to idle without ever emitting agent_settled.
+      if (event.event === "send_message" && run.unappended.size) void this.checkUndelivered(run);
       run.view.activity = `Extension error: ${event.event}`;
       this.changed(run);
       return;
@@ -221,6 +226,25 @@ export class RunManager implements ViewSource {
       void this.reconcile(run);
     }
     this.changed(run, persist);
+  }
+  private async checkUndelivered(run: Run): Promise<void> {
+    const child = run.child!;
+    const closeVersion = run.closeVersion;
+    const inputTail = run.inputTail;
+    const ids = [...run.unappended.keys()];
+    const current = () => !this.stopped && !isTerminal(run.view.status)
+      && run.child === child && run.closeVersion === closeVersion
+      && run.inputTail === inputTail && !run.pending && ids.some(id => run.unappended.has(id));
+    try {
+      await inputTail; // Let submission or interrupt finish before inspecting idle state.
+      if (!current()) return;
+      const state = await child.request({ type: "get_state" }) as RpcSessionState;
+      if (current() && !state.isStreaming && !state.isCompacting) {
+        await this.finish(run, "failed", "Child is idle with undelivered input; message delivery is uncertain.");
+      }
+    } catch (error) {
+      if (current()) await this.finish(run, "failed", `Could not confirm parent-message delivery: ${String(error)}`);
+    }
   }
   private async submit(run: Run, message: string): Promise<unknown> {
     const child = run.child;

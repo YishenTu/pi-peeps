@@ -53,7 +53,7 @@ class FakeChild implements ChildConnection {
   complete(text?: string, stop?: AssistantMessage["stopReason"]) {
     this.emit({ type: "agent_start" });
     this.emit({ type: "message_end", message: answer(text, stop) });
-    this.emit({ type: "agent_settled" });
+    this.emit({ type: "agent_settled", aborted: false });
   }
 }
 interface SetupOptions {
@@ -123,7 +123,7 @@ test("messages use the child receiver whatever the child is doing; several can f
   await manager.send(run.id, "also check X");
   await manager.send(run.id, "and Y");
   child.emit({ type: "message_end", message: answer("covered X and Y") });
-  child.emit({ type: "agent_settled" });
+  child.emit({ type: "agent_settled", aborted: false });
   await flush();
   assert.deepEqual(reports.map(r => [r.seq, r.status, r.text]), [[1, "answer", "covered X and Y"]]);
 
@@ -356,13 +356,13 @@ test("a report never reuses an earlier answer; inspection only shows current wor
   assert.deepEqual(manager.answer(run.id), { text: "", kind: "unavailable" });
   child.emit({ type: "message_end", message: answer("working on it", "toolUse") });
   assert.deepEqual(manager.answer(run.id), { text: "working on it", kind: "partial" });
-  child.emit({ type: "agent_settled" });
+  child.emit({ type: "agent_settled", aborted: false });
   await flush();
   assert.deepEqual(reports.map(r => r.status), ["answer", "no-answer"]);
 
   await manager.send(run.id, "third");
   child.emit({ type: "agent_start" });
-  child.emit({ type: "agent_settled" }); // Settled without any new assistant message.
+  child.emit({ type: "agent_settled", aborted: false }); // Settled without any new assistant message.
   await flush();
   assert.deepEqual(reports.map(r => [r.seq, r.status]), [[1, "answer"], [2, "no-answer"], [3, "no-answer"]]);
   assert.ok(!reports.slice(1).some(r => r.text.includes("first answer") || r.text === "working on it"));
@@ -388,20 +388,115 @@ test("a quiet child cannot report success with an unobserved custom message, eve
   assert.deepEqual(h.reports.map(report => report.status), ["failed"]);
 });
 
-for (const [extensionPath, event] of [["<runtime>", "send_message"], [`command:${RECEIVE_COMMAND}`, "command"]]) {
-  test(`receiver failure via ${event} closes the child and reports failure`, async t => {
+for (const afterSettle of [false, true]) {
+  test(`a runtime send_message error ${afterSettle ? "after" : "before"} quiet reports no-answer and keeps the admitted child alive`, async t => {
     const h = setup();
     t.after(() => h.manager.close());
     const run = h.manager.spawn({ task: "task" }, defaults, null);
     await flush();
-    h.children[0]!.emit({ type: "extension_error", extensionPath: extensionPath!, event: event!, error: "receiver failed" });
+    const child = h.children[0]!;
+    child.emit({ type: "agent_start" });
+    if (afterSettle) child.emit({ type: "agent_settled", aborted: false });
+    child.emit({ type: "extension_error", extensionPath: "<runtime>", event: "send_message", error: "run failed" });
+    if (!afterSettle) child.emit({ type: "agent_settled", aborted: false });
     await flush();
-    assert.equal(run.status, "failed");
-    assert.match(run.error!, /Parent message delivery failed: receiver failed/);
-    assert.equal(h.children[0]!.closed, true);
-    assert.deepEqual(h.reports.map(report => report.status), ["failed"]);
+    assert.equal(run.status, "idle");
+    assert.equal(child.closed, false);
+    assert.deepEqual(h.reports.map(report => report.status), ["no-answer"]);
+    await h.manager.send(run.id, "try again");
+    child.complete("recovered");
+    await flush();
+    assert.deepEqual(h.reports.map(report => [report.status, report.text]).slice(1), [["answer", "recovered"]]);
+    assert.equal(h.children.length, 1, "the same child accepts the next message");
   });
 }
+
+test("an unrelated send_message error cannot kill a child with queued parent input", async t => {
+  const h = setup();
+  t.after(() => h.manager.close());
+  const run = h.manager.spawn({ task: "task" }, defaults, null);
+  await flush();
+  const child = h.children[0]!;
+  child.emit({ type: "agent_start" });
+  let queued!: { id: string; text: string };
+  child.handler = async command => {
+    if (command.type === "prompt") {
+      queued = parseParentMessage(command.message.slice(`/${RECEIVE_COMMAND} `.length));
+      child.emit({ type: "extension_error", extensionPath: "<runtime>", event: "send_message", error: "another extension failed" });
+      return { disposition: "handled" };
+    }
+    return { isStreaming: true, isCompacting: false, pendingMessageCount: 0 };
+  };
+  await h.manager.send(run.id, "queued input");
+  assert.equal(child.closed, false);
+  child.emit({ type: "message_start", message: { role: "custom", customType: PARENT_MESSAGE_TYPE,
+    content: queued.text, details: { messageId: queued.id }, display: true, timestamp: 1 } });
+  child.handler = undefined;
+  child.complete("exact answer");
+  child.emit({ type: "extension_error", extensionPath: "<runtime>", event: "send_message", error: "unrelated error after answer" });
+  await flush();
+  assert.equal(run.status, "idle");
+  assert.deepEqual(h.reports.map(report => [report.status, report.text]), [["answer", "exact answer"]]);
+});
+
+for (const change of ["append", "new input", "close"] as const) {
+  test(`a runtime error's idle check cannot fail delivery after ${change}`, async t => {
+    const h = setup();
+    t.after(() => h.manager.close());
+    const run = h.manager.spawn({ task: "task" }, defaults, null);
+    await flush();
+    const child = h.children[0]!;
+    let queued!: { id: string; text: string };
+    child.handler = async command => {
+      if (command.type === "prompt") {
+        queued = parseParentMessage(command.message.slice(`/${RECEIVE_COMMAND} `.length));
+        return { disposition: "handled" };
+      }
+      return { isStreaming: true, isCompacting: false, pendingMessageCount: 0 };
+    };
+    await h.manager.send(run.id, "queued");
+    const state = deferred<unknown>();
+    child.handler = async command => command.type === "get_state" ? state.promise : {};
+    child.emit({ type: "extension_error", extensionPath: "<runtime>", event: "send_message", error: "runtime failure" });
+    await flush();
+    if (change === "append") {
+      child.emit({ type: "message_start", message: { role: "custom", customType: PARENT_MESSAGE_TYPE,
+        content: queued.text, details: { messageId: queued.id }, display: true, timestamp: 1 } });
+    } else if (change === "new input") {
+      child.handler = async command => command.type === "prompt" ? { disposition: "handled" }
+        : { isStreaming: true, isCompacting: false, pendingMessageCount: 0 };
+      await h.manager.send(run.id, "new input");
+    } else {
+      await h.manager.closeChild(run.id);
+    }
+    state.resolve({ isStreaming: false, isCompacting: false, pendingMessageCount: 0 });
+    await flush();
+    assert.notEqual(run.status, "failed");
+    assert.equal(child.closed, change === "close");
+    assert.deepEqual(h.reports, []);
+  });
+}
+
+test("a receiver command failure before append closes the child and reports failure", async t => {
+  const h = setup();
+  t.after(() => h.manager.close());
+  const run = h.manager.spawn({ task: "task" }, defaults, null);
+  await flush();
+  const child = h.children[0]!;
+  child.handler = async command => {
+    if (command.type === "prompt") {
+      child.emit({ type: "extension_error", extensionPath: `command:${RECEIVE_COMMAND}`, event: "command", error: "receiver failed" });
+      return { disposition: "handled" };
+    }
+    return {};
+  };
+  await assert.rejects(h.manager.send(run.id, "undeliverable"), /closed during message submission/);
+  await flush();
+  assert.equal(run.status, "failed");
+  assert.match(run.error!, /Parent message delivery failed: receiver failed/);
+  assert.equal(child.closed, true);
+  assert.deepEqual(h.reports.map(report => report.status), ["failed"]);
+});
 
 test("interrupt excludes observed custom messages and admits concurrent new messages only after abort", async t => {
   const h = setup();
@@ -468,7 +563,7 @@ test("interrupt stops current work, keeps the child, returns discarded messages,
   assert.deepEqual(await manager.interrupt(run.id), { interrupted: true, discarded: ["queued note"] });
   assert.deepEqual(child.commands.slice(-2).map(c => c.type), ["clear_queue", "abort"]);
   child.emit({ type: "message_end", message: answer("half done", "aborted") });
-  child.emit({ type: "agent_settled" });
+  child.emit({ type: "agent_settled", aborted: false });
   await flush();
   assert.equal(run.status, "idle");
   assert.equal(run.activity, "Idle · interrupted");
@@ -492,7 +587,7 @@ test("interrupt racing a finished answer keeps that answer's report", async () =
   const child = children[0]!;
   child.emit({ type: "agent_start" });
   child.handler = async command => {
-    if (command.type === "abort") { child.emit({ type: "message_end", message: answer("done anyway") }); child.emit({ type: "agent_settled" }); }
+    if (command.type === "abort") { child.emit({ type: "message_end", message: answer("done anyway") }); child.emit({ type: "agent_settled", aborted: true }); }
     return command.type === "get_state" ? { isStreaming: false, isCompacting: false, pendingMessageCount: 0 } : {};
   };
   await manager.interrupt(run.id);
@@ -602,7 +697,7 @@ test("an archive read started before resume cannot replace live events or report
   h.children[1]!.emit({ type: "message_end", message: answer("NEW ANSWER") });
   read.resolve([answer("OLD ANSWER")]); // A different parsed object with the same old answer.
   await loading;
-  h.children[1]!.emit({ type: "agent_settled" });
+  h.children[1]!.emit({ type: "agent_settled", aborted: false });
   await flush();
   assert.deepEqual(h.reports.map(r => r.text), ["OLD ANSWER", "NEW ANSWER"]);
   assert.ok(run.transcript.items.some(i => i.kind === "message" && i.message.role === "assistant" &&
@@ -686,7 +781,7 @@ test("oversized archives permit resume with new events only; other archive failu
   await h.manager.send(run.id, "new task");
   assert.equal(run.transcript.items.length, 1, "the newly submitted parent message is projected");
   h.children[1]!.emit({ type: "agent_start" });
-  h.children[1]!.emit({ type: "agent_settled" });
+  h.children[1]!.emit({ type: "agent_settled", aborted: false });
   await flush();
   assert.equal(h.reports[1]!.status, "no-answer", "old answers must not be reused");
   await h.manager.send(run.id, "answer now");

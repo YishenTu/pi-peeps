@@ -163,6 +163,10 @@ function resolvePiRpcEntry(packageDir: string): string {
   if (!isFile(entry)) {
     throw new Error(`unsupported Pi install: RPC entry not found at ${entry}`);
   }
+  const version = typeof manifest.version === "string" ? manifest.version : "unknown";
+  if (!/^\d+\.\d+\.\d+(?:\+[0-9A-Za-z.-]+)?$/.test(version) || compareVersions(version, [1, 2, 0]) < 0) {
+    throw new Error(`Peeps requires stable Pi 1.2.0 or newer so parent messages run extension startup hooks (installed: ${version}). Upgrade Pi before spawning children.`);
+  }
   const minimum = minNodeFromEngines(manifest.engines);
   if (minimum !== undefined && compareVersions(process.versions.node, minimum) < 0) {
     throw new Error(
@@ -223,6 +227,7 @@ function resolveResource(cwd: string, value: string): string {
 
 function appendResourceArgs(args: string[], parent: Args, cwd: string): void {
   if (parent.noExtensions) args.push("--no-extensions");
+  if (parent.noMcp) args.push("--no-mcp");
   for (const value of parent.extensions ?? []) {
     args.push("--extension", resolveResource(cwd, value));
   }

@@ -37,7 +37,7 @@ Or try it for one session without installing:
 pi -e git:github.com/YishenTu/pi-peeps
 ```
 
-Works in Pi's terminal UI and in RPC mode (`pi --mode rpc`, as used by apps that embed Pi) on macOS and Linux (Linux not yet tested). Print and JSON mode (`pi -p`, `pi --mode json`) aren't supported because Pi exits after the prompt, which would close every subagent. Windows and compiled Pi binaries aren't supported.
+Requires Pi 1.2.0 or newer so other extensions' startup instructions also run in subagents. Works in Pi's terminal UI and in RPC mode (`pi --mode rpc`, as used by apps that embed Pi) on macOS and Linux (Linux not yet tested). Print and JSON mode (`pi -p`, `pi --mode json`) aren't supported because Pi exits after the prompt, which would close every subagent. Windows and compiled Pi binaries aren't supported.
 
 ## Usage
 
@@ -47,15 +47,13 @@ Just ask, for example:
 
 Each subagent is a Pi session of its own: it starts with a fresh conversation in the same directory and uses the main agent's model unless told otherwise. Whenever it finishes working, its answer comes back. The main agent can also interrupt a subagent's current work without losing it.
 
-Tasks and later parent messages appear as **Message from parent** in the child viewer and are stored as native Pi custom messages (`peeps-message`). Their text is literal: slash commands, skill commands, and prompt templates are not executed or expanded. Child answers return as `peeps-result` custom messages. Pi sends custom-message content to model providers under the user role; within Pi, it remains separate from human prompts.
-
-Sending confirms submission, not proof that the child model consumed the message. Peeps does not automatically resend uncertain messages. Interrupt returns queued parent messages that were discarded.
+Tasks and later parent messages appear as **Message from parent** in the child viewer. Their text is literal: slash commands, skill commands, and prompt templates are not executed or expanded. Interrupt returns queued parent messages that were discarded.
 
 Subagents don't hold on to resources: one that sits idle for 10 minutes closes, and all of them close when your session ends. Messaging a closed subagent resumes it where it left off, even after you reload or restart Pi.
 
 ### Watching subagents
 
-The overview, viewer, and shortcut are part of the terminal UI. In RPC mode, each answer reaches the client as an ordinary session message (`role: "custom"`, `customType: "peeps-result"`), and `/peeps interrupt` and `/peeps close` still work as prompts.
+The overview, viewer, and shortcut are part of the terminal UI. In RPC mode, each answer reaches the client as a session message, and `/peeps interrupt` and `/peeps close` still work as prompts.
 
 | Key | Action |
 | --- | --- |
@@ -76,8 +74,6 @@ The overview, viewer, and shortcut are part of the terminal UI. In RPC mode, eac
 - **Ephemeral sessions** (`--no-session`) keep no subagent history, so their subagents can't resume and never close for idleness.
 
 Some delivery edge cases come from Pi itself: [#5581](https://github.com/earendil-works/pi/issues/5581), [#9886](https://github.com/earendil-works/pi/issues/9886), [#10267](https://github.com/earendil-works/pi/issues/10267), [#6744](https://github.com/earendil-works/pi/issues/6744), [#9632](https://github.com/earendil-works/pi/issues/9632).
-
-On Pi 1.0.2, custom-message starts skip `before_agent_start` extension handlers. Peeps supplies Pi's effective system prompt through the public context hook if startup omitted it, preserving loaded project instructions and tool declarations. Extensions that depend on `before_agent_start` still need a Pi version that runs that hook for custom-message starts.
 
 ## Development
 

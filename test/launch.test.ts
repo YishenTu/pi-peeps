@@ -42,7 +42,7 @@ async function makePiPackage(root: string, name = PI_PACKAGE_NAME): Promise<stri
   await mkdir(join(pkg, "dist"), { recursive: true });
   await writeFile(
     join(pkg, "package.json"),
-    JSON.stringify({ name, version: "1.0.2", engines: { node: ">=22.19.0" } }),
+    JSON.stringify({ name, version: "1.2.0", engines: { node: ">=22.19.0" } }),
     "utf8",
   );
   await writeFile(join(pkg, "dist", "rpc-entry.js"), "// fake rpc entry\n", "utf8");
@@ -174,6 +174,7 @@ test("resource allowlist is reproduced and relative paths resolve against cwd", 
       "--extension",
       "builtin:mcp",
       "--no-extensions",
+      "--no-mcp",
       "--no-skills",
       "--skill",
       "skills/a.md",
@@ -191,6 +192,7 @@ test("resource allowlist is reproduced and relative paths resolve against cwd", 
   const args = spec.options.args;
 
   assert.ok(args.includes("--no-extensions"));
+  assert.ok(args.includes("--no-mcp"));
   assert.ok(hasFlagValue(args, "--extension", resolve(f.cwd, "ext.ts")));
   // Repeated --extension keeps every value and builtins stay verbatim.
   assert.equal(args.filter((arg) => arg === "--extension").length, 3);
@@ -345,6 +347,15 @@ test("rejects unsupported runtime and install shapes", async (t) => {
     /is not @earendil-works\/pi-coding-agent/,
   );
 });
+
+for (const version of ["1.0.2", "1.1.0", "1.2.0-beta.1", undefined]) {
+  test(`rejects Pi ${version ?? "with no version"} before creating a child archive`, async t => {
+    const f = await fixture(t);
+    await writeFile(join(f.pkg, "package.json"), JSON.stringify({ name: PI_PACKAGE_NAME, version }));
+    await assert.rejects(buildLaunch(contextFor(f), runFor()), /requires stable Pi 1\.2\.0 or newer/);
+    assert.ok(!existsSync(join(f.agentDir, "sessions")));
+  });
+}
 
 test("accepts a full process.argv and rejects an SDK-host entry script", async (t) => {
   const f = await fixture(t);

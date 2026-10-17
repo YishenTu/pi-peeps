@@ -120,6 +120,7 @@ const TEST_TIMEOUT_MS = 120_000;
 const START_TIMEOUT_MS = 60_000;
 
 interface ScriptSpec {
+  failStartup?: boolean;
   finalText: string;
   steerToken: string;
   gateTag: string;
@@ -292,6 +293,21 @@ async function createHarness(root: string, spec: ScriptSpec, projectInstructions
   };
 }
 
+test("an asynchronous startup failure reports undelivered input without a settled event", { timeout: TEST_TIMEOUT_MS }, async t => {
+  const root = await mkdtemp(join(tmpdir(), "peeps-integration-startup-failure-"));
+  const harness = await createHarness(root, { finalText: "unused", steerToken: "unused", gateTag: "unused", failStartup: true });
+  t.after(async () => { await harness.close(); await rm(root, { recursive: true, force: true }); });
+  const run = harness.manager.spawn({ task: "task" }, { model: MODEL, thinking: "off" }, null);
+  await waitFor(() => existsSync(join(harness.testDir, "startup-waiting")), "startup hook never ran");
+  const submitted = await harness.manager.send(run.id, "queued during startup") as { disposition: string };
+  assert.equal(submitted.disposition, "submitted", "initial state checks see an active startup");
+  await writeFile(join(harness.testDir, "release-startup"), "go");
+  await waitFor(() => run.status === "failed", "startup failure left unconfirmed input stranded", 3_000);
+  assert.equal((await harness.outcomeFor(run.id)).status, "failed");
+  assert.match(run.error!, /undelivered input/);
+  assert.deepEqual(await harness.readRequests(), [], "preparation failed before any model request");
+});
+
 function nonSystemMessages(record: RequestRecord): { role: string; text: string }[] {
   return record.messages.filter((message) => message.role !== "system");
 }
@@ -367,8 +383,9 @@ test("RPC child has fresh context, steers natively, returns exact text, follows 
   assert.equal(first.model.provider, SCRIPTED_PROVIDER);
   assert.equal(first.model.id, SCRIPTED_MODEL);
   assert.ok(!first.systemPrompt.includes(task), "task must not be duplicated into the child system prompt");
-  for (const guidance of ["PEEPS_TEST_PROJECT_GUIDANCE", "PEEPS_TEST_APPEND_GUIDANCE", "PEEPS_TEST_TOOL_GUIDANCE"]) {
+  for (const guidance of ["PEEPS_TEST_PROJECT_GUIDANCE", "PEEPS_TEST_APPEND_GUIDANCE", "PEEPS_TEST_TOOL_GUIDANCE", "PEEPS_TEST_STARTUP_GUIDANCE:custom"]) {
     assert.ok(first.systemPrompt.includes(guidance), `first custom-triggered request lost ${guidance}`);
+    assert.ok(last.systemPrompt.includes(guidance), `idle follow-up request lost ${guidance}`);
   }
 
   // Regression guard: the Peeps extension is loaded but must no-op in the child.
@@ -540,6 +557,7 @@ test(`interrupt keeps a real child; after close and reload it resumes its own se
 
   // The resumed model call carries the whole earlier conversation.
   const requests = await harness.readRequests();
+  assert.ok(requests.at(-1)!.systemPrompt.includes("PEEPS_TEST_STARTUP_GUIDANCE:custom"), "resumed run invokes extension startup hooks");
   const last = nonSystemMessages(requests[requests.length - 1] as RequestRecord);
   assert.equal(last[0]?.text, task);
   assert.ok(last.some((message) => message.text === first));

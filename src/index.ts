@@ -130,7 +130,10 @@ export default function peeps(pi: ExtensionAPI): void {
   pi.on("session_tree", async (_event, ctx) => { await stop(); start(ctx); });
   pi.on("agent_start", (_event, ctx) => { parentBusy = true; runtime?.delivery.watch(ctx.signal); });
   pi.on("input", (event) => { runtime?.delivery.input(event.source); });
-  pi.on("before_agent_start", () => { runtime?.delivery.beforeAgentStart(); runtime?.delivery.reconcile(); });
+  pi.on("before_agent_start", (event) => {
+    if (event.messageType === "user") runtime?.delivery.beforeAgentStart();
+    runtime?.delivery.reconcile();
+  });
   pi.on("message_end", (event) => {
     if (event.message.role === "custom" && event.message.customType === RESULT_TYPE) {
       const current = runtime;

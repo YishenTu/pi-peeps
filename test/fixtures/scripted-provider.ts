@@ -69,6 +69,7 @@ const USAGE: Usage = {
 };
 
 interface ScriptSpec {
+  failStartup?: boolean;
   finalText: string;
   steerToken: string;
   gateTag: string;
@@ -84,6 +85,7 @@ function readSpec(): ScriptSpec {
     try {
       const parsed = JSON.parse(raw) as Partial<ScriptSpec>;
       return {
+        failStartup: parsed.failStartup === true,
         finalText: typeof parsed.finalText === "string" ? parsed.finalText : "SCRIPTED-FINAL",
         steerToken: typeof parsed.steerToken === "string" ? parsed.steerToken : "STEER-TOKEN",
         gateTag: typeof parsed.gateTag === "string" ? parsed.gateTag : GATE_TOOL_TAG,
@@ -238,6 +240,18 @@ export default function scriptedProviderExtension(pi: ExtensionAPI): void {
     async handler() { if (dir) writeFileSync(join(dir, "command-executed"), "unexpected"); },
   });
   pi.on("input", () => { if (dir) writeFileSync(join(dir, "human-input"), "unexpected"); });
+  pi.on("before_agent_start", async event => {
+    if (readSpec().failStartup) {
+      writeFileSync(join(dir, "startup-waiting"), "ready");
+      const deadline = Date.now() + GATE_TIMEOUT_MS;
+      while (!existsSync(join(dir, "release-startup")) && Date.now() < deadline) await delay(GATE_POLL_MS);
+      // Public hook mutation accepted by the handler, then rejected by Pi's
+      // prompt builder after it returns. No agent_start/agent_settled is emitted.
+      event.systemPromptOptions.sections["Invalid Name"] = "invalid section";
+      return;
+    }
+    return { systemPrompt: `${event.systemPrompt}\nPEEPS_TEST_STARTUP_GUIDANCE:${event.messageType}` };
+  });
   if (dir) {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "child.pid"), String(process.pid));
