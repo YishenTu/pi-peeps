@@ -23,6 +23,7 @@ import type { TUI } from "@earendil-works/pi-tui";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { TranscriptItem } from "../contracts.ts";
 import type { ItemComponent, ItemFactory } from "./render.ts";
+import { PARENT_MESSAGE_TYPE } from "../parent-message.ts";
 
 type MessageItem = Extract<TranscriptItem, { kind: "message" }>;
 type ToolItem = Extract<TranscriptItem, { kind: "tool" }>;
@@ -207,7 +208,9 @@ const createMessage = (item: MessageItem, options: NativeFactoryOptions, markdow
     case "assistant":
       return createAssistant(item, options, markdownTheme);
     case "custom": {
-      const component = new CustomMessageComponent(message, undefined, markdownTheme, options.outputPad ?? 1);
+      const display = message.customType === PARENT_MESSAGE_TYPE
+        ? { ...message, customType: "Message from parent" } : message;
+      const component = new CustomMessageComponent(display, undefined, markdownTheme, options.outputPad ?? 1);
       return wrap({
         render: (width: number) => component.render(width),
         invalidate: () => component.invalidate(),

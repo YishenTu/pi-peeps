@@ -130,7 +130,10 @@ export default function peeps(pi: ExtensionAPI): void {
   pi.on("session_tree", async (_event, ctx) => { await stop(); start(ctx); });
   pi.on("agent_start", (_event, ctx) => { parentBusy = true; runtime?.delivery.watch(ctx.signal); });
   pi.on("input", (event) => { runtime?.delivery.input(event.source); });
-  pi.on("before_agent_start", () => { runtime?.delivery.beforeAgentStart(); runtime?.delivery.reconcile(); });
+  pi.on("before_agent_start", (event) => {
+    if (event.messageType === "user") runtime?.delivery.beforeAgentStart();
+    runtime?.delivery.reconcile();
+  });
   pi.on("message_end", (event) => {
     if (event.message.role === "custom" && event.message.customType === RESULT_TYPE) {
       const current = runtime;
@@ -167,7 +170,7 @@ export default function peeps(pi: ExtensionAPI): void {
   });
   pi.registerTool({
     name: "peeps_send", label: "Message peep", outputSchema: output,
-    description: "Send a message to a child, like typing into its Pi session. A working child is steered; an idle one starts working again with its conversation intact; a closed one is resumed first. Returns once Pi admits the message; any resulting answer arrives automatically as another Peeps notice.",
+    description: "Send a literal message from the parent to a child, shown separately from human prompts. A working child is steered; an idle one starts working again with its conversation intact; a closed one is resumed first. Slash commands and prompt templates are not executed or expanded. Returns submission status, not proof of model consumption; any resulting answer arrives automatically as another Peeps notice.",
     parameters: Type.Object({ id: Type.String(), message: Type.String({ minLength: 1 }) }),
     async execute(_id, params, signal, _update, ctx) {
       signal?.throwIfAborted();

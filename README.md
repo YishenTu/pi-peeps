@@ -10,7 +10,7 @@ Your main agent hands tasks to background agents and keeps working. Each answer 
 
 - **Delegate in plain language.** Ask the main agent to split up work; it starts subagents as needed.
 - **No polling.** Answers arrive automatically; results finishing together arrive as one notice.
-- **Just talk to them.** The main agent messages a subagent the way you'd type into Pi: a working subagent takes it as steering, an idle one picks up where it left off, and a closed one wakes up with its conversation intact.
+- **Just talk to them.** A working subagent takes a parent message as steering, an idle one picks up where it left off, and a closed one wakes up with its conversation intact. The thread labels these messages as coming from the parent.
 - **Watch live.** Open any subagent's thread in a read-only viewer inside Pi.
 
 ## Compared with other Pi subagent extensions
@@ -20,7 +20,7 @@ As of October 2026:
 | | Peeps | [Pi's example](https://github.com/earendil-works/pi/tree/main/packages/coding-agent/examples/extensions/subagent) | [pi-subagents](https://github.com/nicobailon/pi-subagents) | [@tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents) | [pi-agent-teams](https://github.com/FradSer/pi-packages) |
 | --- | --- | --- | --- | --- | --- |
 | Subagent runs as | Its own Pi process | Its own Pi process | Inside the main Pi process | Inside the main Pi process | Its own Pi process |
-| Task arrives as | A plain message | A plain message | A plain message | A plain message | A role-and-task envelope |
+| Task arrives as | A custom message from the parent | A plain message | A plain message | A plain message | A role-and-task envelope |
 | Sees the main conversation | Never | No | Optional | Optional | Optional |
 | Messages after the task | Any time; resumes after close or restart | No | Steer, resume | Steer, resume | Steer, follow-up |
 | Answer comes back as | Its final reply, delivered mid-turn or waking the main agent | A tool result the main agent waits on | A tool result, or a background notice | A tool result, or a notice after the main agent's turn | Whatever the subagent submits with a work tool |
@@ -37,7 +37,7 @@ Or try it for one session without installing:
 pi -e git:github.com/YishenTu/pi-peeps
 ```
 
-Works in Pi's terminal UI and in RPC mode (`pi --mode rpc`, as used by apps that embed Pi) on macOS and Linux (Linux not yet tested). Print and JSON mode (`pi -p`, `pi --mode json`) aren't supported because Pi exits after the prompt, which would close every subagent. Windows and compiled Pi binaries aren't supported.
+Requires Pi 1.2.0 or newer so other extensions' startup instructions also run in subagents. Works in Pi's terminal UI and in RPC mode (`pi --mode rpc`, as used by apps that embed Pi) on macOS and Linux (Linux not yet tested). Print and JSON mode (`pi -p`, `pi --mode json`) aren't supported because Pi exits after the prompt, which would close every subagent. Windows and compiled Pi binaries aren't supported.
 
 ## Usage
 
@@ -47,11 +47,13 @@ Just ask, for example:
 
 Each subagent is a Pi session of its own: it starts with a fresh conversation in the same directory and uses the main agent's model unless told otherwise. Whenever it finishes working, its answer comes back. The main agent can also interrupt a subagent's current work without losing it.
 
+Tasks and later parent messages appear as **Message from parent** in the child viewer. Their text is literal: slash commands, skill commands, and prompt templates are not executed or expanded. Interrupt returns queued parent messages that were discarded.
+
 Subagents don't hold on to resources: one that sits idle for 10 minutes closes, and all of them close when your session ends. Messaging a closed subagent resumes it where it left off, even after you reload or restart Pi.
 
 ### Watching subagents
 
-The overview, viewer, and shortcut are part of the terminal UI. In RPC mode, each answer reaches the client as an ordinary session message (`role: "custom"`, `customType: "peeps-result"`), and `/peeps interrupt` and `/peeps close` still work as prompts.
+The overview, viewer, and shortcut are part of the terminal UI. In RPC mode, each answer reaches the client as a session message, and `/peeps interrupt` and `/peeps close` still work as prompts.
 
 | Key | Action |
 | --- | --- |

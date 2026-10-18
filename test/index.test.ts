@@ -226,17 +226,18 @@ for (const human of ["interactive", "rpc"] as const) test(`actual index Stop wir
   assert.equal((status.details as any).delivery, "held");
   assert.equal(h.notices.length, 0, "Stop holds the outcome instead of waking the parent");
 
-  await h.emit("before_agent_start"); // Another extension's turn.
+  await h.emit("before_agent_start", { messageType: "custom" }); // Another extension's turn.
   await h.emit("input", { source: "extension" });
-  await h.emit("before_agent_start");
+  await h.emit("before_agent_start", { messageType: "user" });
   await h.emit("input", { source: human }); // Input alone does not release.
-  assert.equal(h.notices.length, 0, "only a human prompt reaching before_agent_start releases the hold");
+  await h.emit("before_agent_start", { messageType: "custom" });
+  assert.equal(h.notices.length, 0, "a custom startup after human input cannot release the hold");
 
-  await h.emit("before_agent_start");
+  await h.emit("before_agent_start", { messageType: "user" });
   assert.equal(h.notices.length, 1);
   assert.equal((h.notices[0] as any).customType, RESULT_TYPE);
   assert.deepEqual(h.sendOptions[0], { deliverAs: "nextTurn", triggerTurn: false });
-  await h.emit("before_agent_start");
+  await h.emit("before_agent_start", { messageType: "user" });
   assert.equal(h.notices.length, 1, "released outcomes are sent once");
   await h.emit("session_shutdown");
 });
